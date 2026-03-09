@@ -1,0 +1,23 @@
+[Unit]
+Description=TFI GTFS Bus Display
+Documentation=https://github.com/your-org/tfi-gtfs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/tfi-display -config /etc/tfi-display/config.yaml
+Restart=on-failure
+RestartSec=10s
+# Give it time to deep-sleep the display on shutdown.
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+
+# Logging via journald.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tfi-display
+
+[Install]
+WantedBy=multi-user.target
