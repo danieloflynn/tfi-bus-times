@@ -1,10 +1,10 @@
-// Package eink provides a hardware-agnostic interface to Waveshare e-ink
-// displays, plus concrete implementations for the 2.13" and 2.9" models.
-package eink
+// Package driver provides a hardware-agnostic interface to display panels,
+// plus concrete implementations for Waveshare e-ink and DPI LCD displays.
+package driver
 
 import "image"
 
-// Driver abstracts one e-ink display panel.
+// Driver abstracts one display panel.
 type Driver interface {
 	// Init resets and initialises the display controller.
 	Init() error

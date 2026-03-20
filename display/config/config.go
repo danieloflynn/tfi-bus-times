@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,21 +16,16 @@ type StopConfig struct {
 
 // Config is loaded from config.yaml at startup.
 type Config struct {
-	APIKey          string       `yaml:"api_key"`
-	StaticURL       string       `yaml:"static_url"`
-	LiveURL         string       `yaml:"live_url"`
-	Stops           []StopConfig `yaml:"stops"`
-	Routes          []string     `yaml:"routes"` // empty = show all routes
-	PollIntervalSec int          `yaml:"poll_interval_seconds"`
-	MaxMinutes      int          `yaml:"max_minutes"`
-	DisplayModel    string       `yaml:"display_model"` // "2.13" or "2.9"
-	DataDir         string       `yaml:"data_dir"`
-	SPIBus          int          `yaml:"spi_bus"`
-	SPIChip         int          `yaml:"spi_chip"`
-	PinDC           int          `yaml:"pin_dc"`
-	PinRST          int          `yaml:"pin_rst"`
-	PinBUSY         int          `yaml:"pin_busy"`
-	VCOM            float64      `yaml:"vcom"` // IT8951 only; e.g. -2.06 (written on FPC ribbon)
+	APIKey            string       `yaml:"api_key"`
+	StaticURL         string       `yaml:"static_url"`
+	LiveURL           string       `yaml:"live_url"`
+	Stops             []StopConfig `yaml:"stops"`
+	Routes            []string     `yaml:"routes"` // empty = show all routes
+	PollIntervalSec   int          `yaml:"poll_interval_seconds"`
+	MaxMinutes        int          `yaml:"max_minutes"`
+	DisplayModel      string       `yaml:"display_model"`      // "lcd"
+	FramebufferDevice string       `yaml:"framebuffer_device"` // default "/dev/fb0"
+	DataDir           string       `yaml:"data_dir"`
 }
 
 // Load reads and validates a YAML config file, applying defaults.
@@ -58,21 +54,18 @@ func Load(path string) (*Config, error) {
 		cfg.MaxMinutes = 90
 	}
 	if cfg.DisplayModel == "" {
-		cfg.DisplayModel = "2.13"
+		cfg.DisplayModel = "lcd"
+	}
+	if cfg.FramebufferDevice == "" {
+		cfg.FramebufferDevice = "/dev/fb0"
 	}
 	if cfg.DataDir == "" {
-		cfg.DataDir = "/var/lib/tfi-display"
+		if cacheDir, err := os.UserCacheDir(); err == nil {
+			cfg.DataDir = filepath.Join(cacheDir, "tfi-display")
+		} else {
+			cfg.DataDir = filepath.Join(os.TempDir(), "tfi-display")
+		}
 	}
-	if cfg.PinDC == 0 {
-		cfg.PinDC = 25
-	}
-	if cfg.PinRST == 0 {
-		cfg.PinRST = 17
-	}
-	if cfg.PinBUSY == 0 {
-		cfg.PinBUSY = 24
-	}
-
 	// Validation
 	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("api_key is required")

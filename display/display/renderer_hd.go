@@ -4,33 +4,45 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"time"
+
+	"tfi-display/fonts"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/math/fixed"
-	"tfi-display/fonts"
 )
 
-// HD layout constants for a 1872×1404 display (10.3").
+// HD layout constants for a 1872-px-wide display (10.3").
+// Row/section heights are fixed; column x-coordinates are scaled per renderHD.
 const (
 	hdHeaderHeight     = 80 // px — top timestamp bar
 	hdSectionBarHeight = 80 // px — per-stop section header bar (≥ HeaderFace ~58px + padding)
 	hdRowHeight        = 80 // px per arrival row
 	hdSectionSeparator = 4  // px between sections
 
-	// Column zones (x-axis).
-	hdRouteBoxStart   = 0
-	hdRouteBoxEnd     = 110
-	hdHeadsignStart   = 126
-	hdHeadsignEnd     = 1500 // wider now that scheduled/RT/delay columns are gone
-	hdScheduledStart  = 1510 // "(Scheduled)" status label
-	hdMinEnd          = 1870
+	// Base column zones calibrated for 1872 px width.
+	hdRouteBoxStart      = 0   // always left edge
+	hdBaseRouteBoxEnd    = 110
+	hdBaseHeadsignStart  = 126
+	hdBaseHeadsignEnd    = 1500
+	hdBaseScheduledStart = 1510
+	hdBaseMinEnd         = 1870
 )
 
-// renderHD draws per-stop sections onto a 1872×1404 (or similarly large) image.
+// renderHD draws per-stop sections onto a large display image.
 // Each section gets a labelled header bar followed by its arrival rows.
 // Available height is divided evenly between sections.
 func renderHD(sections []StopSection, now time.Time, width, height int) *image.Gray {
+	// Scale column x-coordinates proportionally from the 1872-px base layout.
+	s := float64(width) / 1872.0
+	sc := func(base int) int { return int(math.Round(float64(base) * s)) }
+	hdRouteBoxEnd    := sc(hdBaseRouteBoxEnd)
+	hdHeadsignStart  := sc(hdBaseHeadsignStart)
+	hdHeadsignEnd    := sc(hdBaseHeadsignEnd)
+	hdScheduledStart := sc(hdBaseScheduledStart)
+	hdMinEnd         := sc(hdBaseMinEnd)
+
 	img := image.NewGray(image.Rect(0, 0, width, height))
 	for i := range img.Pix {
 		img.Pix[i] = 0xFF
@@ -124,7 +136,7 @@ func renderHD(sections []StopSection, now time.Time, width, height int) *image.G
 
 			// "(Scheduled)" badge when no realtime data — signals the bus may not show.
 			if a.RealtimeTime.IsZero() {
-				hdDrawText(img, "(Scheduled)", hdScheduledStart, baseline, color.Gray{Y: 0x80}, fonts.SmallFace)
+				hdDrawText(img, "(Scheduled)", hdScheduledStart, baseline, color.Gray{Y: 0x80}, fonts.BodyFace)
 			}
 
 			// Minutes until effective arrival (realtime if available, else scheduled).

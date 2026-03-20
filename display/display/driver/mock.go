@@ -1,22 +1,12 @@
-// Package eink mock driver — writes frames as PNG files for visual inspection.
+// Package driver mock driver — writes frames as PNG files for visual inspection.
 // This file is always compiled (no build tag) and can be used on any platform.
-package eink
+package driver
 
 import (
 	"fmt"
 	"image"
 	"image/png"
 	"os"
-)
-
-// Display dimensions (duplicated here so mock.go compiles without the linux drivers).
-const (
-	mockEPD213Width   = 250
-	mockEPD213Height  = 122
-	mockEPD29Width    = 296
-	mockEPD29Height   = 128
-	mockEPD10in3Width = 1872
-	mockEPD10in3Height = 1404
 )
 
 // MockDriver implements Driver by saving frames as PNG files.
@@ -28,19 +18,11 @@ type MockDriver struct {
 }
 
 // NewMockDriver creates a MockDriver writing PNG files to outDir.
-// model should be "2.13" or "2.9".
-func NewMockDriver(model, outDir string) (*MockDriver, error) {
-	w, h := mockEPD213Width, mockEPD213Height
-	switch model {
-	case "2.9":
-		w, h = mockEPD29Width, mockEPD29Height
-	case "10.3":
-		w, h = mockEPD10in3Width, mockEPD10in3Height
-	}
+func NewMockDriver(outDir string) (*MockDriver, error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating mock output dir: %w", err)
 	}
-	return &MockDriver{width: w, height: h, outDir: outDir}, nil
+	return &MockDriver{width: 1024, height: 600, outDir: outDir}, nil
 }
 
 func (m *MockDriver) Width() int  { return m.width }

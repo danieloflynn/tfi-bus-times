@@ -10,7 +10,7 @@ import (
 
 	"tfi-display/config"
 	"tfi-display/display"
-	"tfi-display/display/eink"
+	"tfi-display/display/driver"
 	"tfi-display/gtfs"
 )
 
@@ -54,9 +54,9 @@ func main() {
 	poller.Poll()
 
 	// --- Display driver ---
-	var drv eink.Driver
+	var drv driver.Driver
 	if *mock {
-		drv, err = eink.NewMockDriver(cfg.DisplayModel, *mockDir)
+		drv, err = driver.NewMockDriver(*mockDir)
 		if err != nil {
 			slog.Error("creating mock driver", "err", err)
 			os.Exit(1)
@@ -93,16 +93,6 @@ func main() {
 		}
 	}()
 
-	// Weekly clear cycle (prevent ghosting on long-running displays).
-	go func() {
-		for range time.Tick(7 * 24 * time.Hour) {
-			slog.Info("weekly clear cycle")
-			if err := drv.Clear(); err != nil {
-				slog.Warn("clear failed", "err", err)
-			}
-		}
-	}()
-
 	// --- Display refresh ticker ---
 	refreshTicker := time.NewTicker(time.Duration(cfg.PollIntervalSec) * time.Second)
 	defer refreshTicker.Stop()
@@ -128,7 +118,7 @@ func main() {
 
 // renderAndDisplay queries arrivals per stop and pushes a new frame to the display.
 func renderAndDisplay(
-	drv eink.Driver,
+	drv driver.Driver,
 	db *gtfs.StaticDB,
 	live *gtfs.LiveStore,
 	cfg *config.Config,

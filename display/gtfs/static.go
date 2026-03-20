@@ -2,7 +2,6 @@ package gtfs
 
 import (
 	"archive/zip"
-	"bytes"
 	"encoding/csv"
 	"encoding/gob"
 	"fmt"
@@ -128,33 +127,39 @@ func buildFromURL(url string, filterStops []string) (*StaticDB, error) {
 		zipTime = time.Now().UTC()
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	tmp, err := os.CreateTemp("", "gtfs-*.zip")
 	if err != nil {
-		return nil, fmt.Errorf("reading GTFS response: %w", err)
+		return nil, fmt.Errorf("creating temp file: %w", err)
 	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
 
-	return buildFromZIPBytes(body, zipTime, filterStops)
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("downloading GTFS: %w", err)
+	}
+	tmp.Close()
+
+	return buildFromZIPFile(tmpPath, zipTime, filterStops)
 }
 
 // BuildFromZIPFile parses a local GTFS ZIP file (useful for testing).
 func BuildFromZIPFile(path string, filterStops []string) (*StaticDB, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
 	info, _ := os.Stat(path)
 	var t time.Time
 	if info != nil {
 		t = info.ModTime()
 	}
-	return buildFromZIPBytes(data, t, filterStops)
+	return buildFromZIPFile(path, t, filterStops)
 }
 
-func buildFromZIPBytes(data []byte, zipTime time.Time, filterStops []string) (*StaticDB, error) {
-	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+func buildFromZIPFile(path string, zipTime time.Time, filterStops []string) (*StaticDB, error) {
+	rc, err := zip.OpenReader(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening ZIP: %w", err)
 	}
+	defer rc.Close()
+	r := &rc.Reader
 
 	db := &StaticDB{
 		StopTimes:       make(map[string]map[int][]StopTime),

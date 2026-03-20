@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill in your API key.
 # Get a free API key from https://developer.nationaltransport.ie/
 
-api_key: ""
+api_key: "your-api-key-here"
 
 # -----------------------------------------------------------------------
 # Bus stops to monitor.  stop_number is the number printed on the stop.
@@ -37,21 +37,8 @@ poll_interval_seconds: 60
 max_minutes: 90
 
 # -----------------------------------------------------------------------
-# Display hardware.  Supported: "2.13" (250×122) or "2.9" (296×128).
+# Display: 7" LCD HAT via /dev/fb0.
+# framebuffer_device defaults to "/dev/fb0" — omit if that's your device.
 # -----------------------------------------------------------------------
-display_model: "10.3"
-
-# -----------------------------------------------------------------------
-# Where to cache the parsed GTFS static data.
-# -----------------------------------------------------------------------
-data_dir: "/var/lib/tfi-display"
-
-# -----------------------------------------------------------------------
-# SPI and GPIO pin numbers (BCM).  These match the Waveshare HAT default.
-# Usually you do not need to change these.
-# -----------------------------------------------------------------------
-spi_bus: 0
-spi_chip: 0
-pin_dc: 25
-pin_rst: 17
-pin_busy: 24
+display_model: "lcd"
+# framebuffer_device: "/dev/fb0"
