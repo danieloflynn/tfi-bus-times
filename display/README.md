@@ -2,6 +2,8 @@
 
 Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from the Transport for Ireland API and renders it to a 7" LCD HAT via `/dev/fb0`.
 
+![Preview](assets/preview.png)
+
 ## Hardware
 
 - Raspberry Pi Zero 2W
