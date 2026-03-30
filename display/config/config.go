@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -23,9 +24,13 @@ type Config struct {
 	Routes            []string     `yaml:"routes"` // empty = show all routes
 	PollIntervalSec   int          `yaml:"poll_interval_seconds"`
 	MaxMinutes        int          `yaml:"max_minutes"`
+	MaxPages          int          `yaml:"max_pages"`             // max pages to cycle (0 = unlimited)
+	PageIntervalSec   int          `yaml:"page_interval_seconds"` // seconds between pages (default: 5)
 	DisplayModel      string       `yaml:"display_model"`      // "lcd"
 	FramebufferDevice string       `yaml:"framebuffer_device"` // default "/dev/fb0"
 	DataDir           string       `yaml:"data_dir"`
+	StartTime         string       `yaml:"start_time"` // e.g. "07:00" — display powers on
+	StopTime          string       `yaml:"stop_time"`  // e.g. "22:00" — display powers off
 }
 
 // Load reads and validates a YAML config file, applying defaults.
@@ -53,6 +58,9 @@ func Load(path string) (*Config, error) {
 	if cfg.MaxMinutes == 0 {
 		cfg.MaxMinutes = 90
 	}
+	if cfg.PageIntervalSec == 0 {
+		cfg.PageIntervalSec = 5
+	}
 	if cfg.DisplayModel == "" {
 		cfg.DisplayModel = "lcd"
 	}
@@ -66,6 +74,19 @@ func Load(path string) (*Config, error) {
 			cfg.DataDir = filepath.Join(os.TempDir(), "tfi-display")
 		}
 	}
+	// Schedule validation: both must be set, or neither.
+	if (cfg.StartTime == "") != (cfg.StopTime == "") {
+		return nil, fmt.Errorf("start_time and stop_time must both be set or both be unset")
+	}
+	if cfg.StartTime != "" {
+		if _, err := time.Parse("15:04", cfg.StartTime); err != nil {
+			return nil, fmt.Errorf("invalid start_time %q: expected HH:MM 24-hour format", cfg.StartTime)
+		}
+		if _, err := time.Parse("15:04", cfg.StopTime); err != nil {
+			return nil, fmt.Errorf("invalid stop_time %q: expected HH:MM 24-hour format", cfg.StopTime)
+		}
+	}
+
 	// Validation
 	if cfg.APIKey == "" {
 		return nil, fmt.Errorf("api_key is required")

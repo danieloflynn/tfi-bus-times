@@ -29,6 +29,7 @@ func (m *MockDriver) Width() int  { return m.width }
 func (m *MockDriver) Height() int { return m.height }
 func (m *MockDriver) Init() error  { return nil }
 func (m *MockDriver) Sleep() error { return nil }
+func (m *MockDriver) Wake() error  { return nil }
 
 func (m *MockDriver) Clear() error {
 	white := image.NewGray(image.Rect(0, 0, m.width, m.height))

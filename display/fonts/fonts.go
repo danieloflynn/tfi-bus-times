@@ -1,34 +1,40 @@
 // Package fonts provides pre-parsed font faces for the HD renderer.
-// It uses Go Mono (a monospace truetype font from golang.org/x/image) at
-// several sizes rendered at 150 DPI for the 10.3" 1872×1404 display.
+// Uses Atkinson Hyperlegible Bold — designed for readability at distance.
 package fonts
 
 import (
+	_ "embed"
+
 	"golang.org/x/image/font"
-	"golang.org/x/image/font/gofont/gomono"
 	"golang.org/x/image/font/opentype"
 )
 
+//go:embed AtkinsonHyperlegible-Bold.ttf
+var atkinsonBoldTTF []byte
+
 var (
-	// HeaderFace is 28pt @ 150 DPI (~58px) — stop name / timestamp.
+	// HeaderFace — section title / timestamp.
 	HeaderFace font.Face
-	// RouteFace is 32pt @ 150 DPI (~67px) — route number in route box.
+	// RouteFace — route number in the route box.
 	RouteFace font.Face
-	// BodyFace is 24pt @ 150 DPI (~50px) — headsign, times, delay.
+	// BodyFace — headsign and times.
 	BodyFace font.Face
-	// SmallFace is 18pt @ 150 DPI (~37px) — "min" suffix.
+	// SmallFace — "min" suffix.
 	SmallFace font.Face
+	// TinyFace — small badges like "(Sched)".
+	TinyFace font.Face
 )
 
 func init() {
-	f, err := opentype.Parse(gomono.TTF)
+	f, err := opentype.Parse(atkinsonBoldTTF)
 	if err != nil {
-		panic("fonts: failed to parse Go Mono TTF: " + err.Error())
+		panic("fonts: failed to parse Atkinson Hyperlegible TTF: " + err.Error())
 	}
-	HeaderFace = mustFace(f, 28)
-	RouteFace = mustFace(f, 32)
-	BodyFace = mustFace(f, 24)
-	SmallFace = mustFace(f, 18)
+	HeaderFace = mustFace(f, 14)
+	RouteFace  = mustFace(f, 18)
+	BodyFace   = mustFace(f, 16)
+	SmallFace  = mustFace(f, 18)
+	TinyFace   = mustFace(f, 10)
 }
 
 func mustFace(f *opentype.Font, size float64) font.Face {

@@ -23,7 +23,19 @@ dtparam=clock-frequency=49000000
 dtparam=rgb666-padhi
 ```
 
+Also add the following to the end of the single line in `/boot/firmware/cmdline.txt` (space-separated, no newline):
+
+```
+vt.global_cursor_default=0 consoleblank=0
+```
+
+This hides the kernel console cursor and prevents the framebuffer from blanking after inactivity.
+
 Reboot — the LCD will appear as `/dev/fb0`.
+
+### VCOM Adjustment
+
+The LCD HAT has a small VCOM potentiometer screw on the board. Turn it slowly with a small screwdriver while the display is showing content to adjust contrast/brightness. There is a sweet spot where the white background is clean and text is crisp.
 
 ## TFI API Key
 

@@ -51,6 +51,13 @@ func NewLiveStore() *LiveStore {
 	}
 }
 
+// FeedTime returns the timestamp of the last successful live data fetch.
+func (s *LiveStore) FeedTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.LastFeedTime
+}
+
 // GetDelay returns the StopDelay for tripID at or before stopSequence using
 // binary search. Returns (StopDelay{}, false) if no realtime data is available.
 func (ls *LiveStore) GetDelay(tripID string, stopSequence int) (StopDelay, bool) {

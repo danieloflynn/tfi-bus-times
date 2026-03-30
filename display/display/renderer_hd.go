@@ -16,9 +16,9 @@ import (
 // HD layout constants for a 1872-px-wide display (10.3").
 // Row/section heights are fixed; column x-coordinates are scaled per renderHD.
 const (
-	hdHeaderHeight     = 80 // px — top timestamp bar
-	hdSectionBarHeight = 80 // px — per-stop section header bar (≥ HeaderFace ~58px + padding)
-	hdRowHeight        = 80 // px per arrival row
+  hdHeaderHeight     = 30
+  hdSectionBarHeight = 36
+  hdRowHeight        = 40
 	hdSectionSeparator = 4  // px between sections
 
 	// Base column zones calibrated for 1872 px width.
@@ -30,6 +30,25 @@ const (
 	hdBaseMinEnd         = 1870
 )
 
+// RowsPerSection returns how many arrival rows fit per section for the given
+// display dimensions and section count. Use this to calculate page size.
+func RowsPerSection(numSections, width, height int) int {
+	if width < hdMinWidth {
+		return maxRows
+	}
+	if numSections < 1 {
+		numSections = 1
+	}
+	availHeight := height - hdHeaderHeight - 2
+	totalSepHeight := (numSections - 1) * hdSectionSeparator
+	heightPerSection := (availHeight - totalSepHeight) / numSections
+	rows := (heightPerSection - hdSectionBarHeight) / hdRowHeight
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
 // renderHD draws per-stop sections onto a large display image.
 // Each section gets a labelled header bar followed by its arrival rows.
 // Available height is divided evenly between sections.
@@ -40,20 +59,15 @@ func renderHD(sections []StopSection, now time.Time, width, height int) *image.G
 	hdRouteBoxEnd    := sc(hdBaseRouteBoxEnd)
 	hdHeadsignStart  := sc(hdBaseHeadsignStart)
 	hdHeadsignEnd    := sc(hdBaseHeadsignEnd)
-	hdScheduledStart := sc(hdBaseScheduledStart)
-	hdMinEnd         := sc(hdBaseMinEnd)
+	hdMinEnd := sc(hdBaseMinEnd)
 
 	img := image.NewGray(image.Rect(0, 0, width, height))
-	for i := range img.Pix {
-		img.Pix[i] = 0xFF
-	}
+	// Background is black.
 
 	// Top header: timestamp.
 	headerBaseline := (hdHeaderHeight + fonts.HeaderFace.Metrics().Ascent.Ceil()) / 2
 	updated := "Updated: " + now.Format("15:04:05")
-	hdDrawTextRight(img, updated, width-4, headerBaseline, black, fonts.HeaderFace)
-	hLine(img, 0, width, hdHeaderHeight, black)
-	hLine(img, 0, width, hdHeaderHeight+1, black)
+	hdDrawTextRight(img, updated, width-4, headerBaseline, white, fonts.HeaderFace)
 
 	if len(sections) == 0 {
 		return img
@@ -73,16 +87,15 @@ func renderHD(sections []StopSection, now time.Time, width, height int) *image.G
 	y := hdHeaderHeight + 2
 	for si, sec := range sections {
 		if si > 0 {
-			// Thick separator between sections.
-			fillRect(img, 0, y, width, y+hdSectionSeparator, color.Gray{Y: 0x60})
-			y += hdSectionSeparator
+			hLine(img, 0, width, y, white)
+			y++
 		}
 
-		// Section header bar: dark gray background, white stop label.
-		fillRect(img, 0, y, width, y+hdSectionBarHeight, color.Gray{Y: 0x30})
+		// Section header bar: white background, black label.
+		fillRect(img, 0, y, width, y+hdSectionBarHeight, white)
 		barAscent := fonts.HeaderFace.Metrics().Ascent.Ceil()
 		barBaseline := y + (hdSectionBarHeight+barAscent)/2
-		hdDrawText(img, sec.Label, 16, barBaseline, white, fonts.HeaderFace)
+		hdDrawText(img, sec.Label, 16, barBaseline, black, fonts.HeaderFace)
 
 		y += hdSectionBarHeight
 
@@ -91,7 +104,7 @@ func renderHD(sections []StopSection, now time.Time, width, height int) *image.G
 			// "No departures" centred in the section body.
 			bodyMid := y + heightPerSection/2
 			msg := "No departures"
-			hdDrawText(img, msg, (width-hdMeasureString(fonts.BodyFace, msg))/2, bodyMid, black, fonts.BodyFace)
+			hdDrawText(img, msg, (width-hdMeasureString(fonts.BodyFace, msg))/2, bodyMid, white, fonts.BodyFace)
 			y += heightPerSection - hdSectionBarHeight
 			continue
 		}
@@ -103,41 +116,32 @@ func renderHD(sections []StopSection, now time.Time, width, height int) *image.G
 		for ri, a := range arrivals {
 			rowY := y + ri*hdRowHeight
 
-			if ri > 0 {
-				hLine(img, 0, width, rowY, color.Gray{Y: 0xCC})
-			}
-
 			ascent := fonts.BodyFace.Metrics().Ascent.Ceil()
 			baseline := rowY + (hdRowHeight+ascent)/2
 
-			// Route box: show platform code if available (e.g. DART), else route short name.
-			routeLabel := a.RouteShort
-			if a.Platform != "" {
-				routeLabel = "Plt " + a.Platform
+			// Route box: skip for DART (section label is sufficient).
+			if a.RouteShort != "DART" {
+				fillRect(img, hdRouteBoxStart, rowY, hdRouteBoxEnd, rowY+hdRowHeight, black)
+				routeW := hdMeasureString(fonts.RouteFace, a.RouteShort)
+				routeX := hdRouteBoxStart + (hdRouteBoxEnd-hdRouteBoxStart-routeW)/2
+				if routeX < hdRouteBoxStart+2 {
+					routeX = hdRouteBoxStart + 2
+				}
+				routeAscent := fonts.RouteFace.Metrics().Ascent.Ceil()
+				routeBaseline := rowY + (hdRowHeight+routeAscent)/2
+				hdDrawText(img, a.RouteShort, routeX, routeBaseline, white, fonts.RouteFace)
 			}
-			fillRect(img, hdRouteBoxStart, rowY, hdRouteBoxEnd, rowY+hdRowHeight, black)
-			routeW := hdMeasureString(fonts.RouteFace, routeLabel)
-			routeX := hdRouteBoxStart + (hdRouteBoxEnd-hdRouteBoxStart-routeW)/2
-			if routeX < hdRouteBoxStart+2 {
-				routeX = hdRouteBoxStart + 2
-			}
-			routeAscent := fonts.RouteFace.Metrics().Ascent.Ceil()
-			routeBaseline := rowY + (hdRowHeight+routeAscent)/2
-			hdDrawText(img, routeLabel, routeX, routeBaseline, white, fonts.RouteFace)
 
 			// Headsign.
 			charW := hdMeasureString(fonts.BodyFace, "M")
 			if charW < 1 {
 				charW = 1
 			}
-			maxRunes := (hdHeadsignEnd - hdHeadsignStart) / charW
+			schedW := hdMeasureString(fonts.TinyFace, "(Sched)")
+			headsignAvail := hdHeadsignEnd - hdHeadsignStart - schedW - 8
+			maxRunes := headsignAvail / charW
 			hs := truncate(a.Headsign, maxRunes)
-			hdDrawText(img, hs, hdHeadsignStart, baseline, black, fonts.BodyFace)
-
-			// "(Scheduled)" badge when no realtime data — signals the bus may not show.
-			if a.RealtimeTime.IsZero() {
-				hdDrawText(img, "(Scheduled)", hdScheduledStart, baseline, color.Gray{Y: 0x80}, fonts.BodyFace)
-			}
+			hdDrawText(img, hs, hdHeadsignStart, baseline, white, fonts.BodyFace)
 
 			// Minutes until effective arrival (realtime if available, else scheduled).
 			mins := a.MinutesUntil(now)
@@ -152,7 +156,14 @@ func renderHD(sections []StopSection, now time.Time, width, height int) *image.G
 			}
 			smallAscent := fonts.SmallFace.Metrics().Ascent.Ceil()
 			smallBaseline := rowY + (hdRowHeight+smallAscent)/2
-			hdDrawTextRight(img, minsStr, hdMinEnd, smallBaseline, black, fonts.SmallFace)
+			hdDrawTextRight(img, minsStr, hdMinEnd, smallBaseline, white, fonts.SmallFace)
+
+			// "(Sched)" badge right-aligned just before the minutes field.
+			if a.RealtimeTime.IsZero() {
+				minsW := hdMeasureString(fonts.SmallFace, minsStr)
+				schedX := hdMinEnd - minsW - schedW - 12
+				hdDrawTextRight(img, "(Sched)", schedX+schedW, smallBaseline, white, fonts.TinyFace)
+			}
 		}
 
 		y += len(arrivals) * hdRowHeight

@@ -8,6 +8,7 @@ import (
 	"image"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 )
@@ -18,11 +19,12 @@ const fbioGetVScreenInfo = 0x4600
 // LCDDPI drives a Linux DPI framebuffer display (e.g. a 7" IPS LCD on /dev/fb0).
 // Pixels are written directly to the mmap'd framebuffer; no SPI or GPIO needed.
 type LCDDPI struct {
-	file   *os.File
-	buf    []byte
-	width  int
-	height int
-	bpp    int // bits per pixel: 16 or 32
+	file      *os.File
+	blankPath string // /sys/class/graphics/fbX/blank
+	buf       []byte
+	width     int
+	height    int
+	bpp       int // bits per pixel: 16 or 32
 }
 
 // NewLCDDPI opens the framebuffer device at path (e.g. "/dev/fb0").
@@ -71,8 +73,9 @@ func NewLCDDPI(path string) (*LCDDPI, error) {
 		return nil, fmt.Errorf("mmap framebuffer: %w", err)
 	}
 
+	blankPath := "/sys/class/graphics/" + filepath.Base(path) + "/blank"
 	slog.Info("LCD framebuffer opened", "path", path, "width", width, "height", height, "bpp", bpp)
-	return &LCDDPI{file: f, buf: buf, width: width, height: height, bpp: bpp}, nil
+	return &LCDDPI{file: f, blankPath: blankPath, buf: buf, width: width, height: height, bpp: bpp}, nil
 }
 
 func (d *LCDDPI) Width() int  { return d.width }
@@ -81,8 +84,15 @@ func (d *LCDDPI) Height() int { return d.height }
 // Init is a no-op for DPI LCD; the framebuffer is ready after mmap.
 func (d *LCDDPI) Init() error { return nil }
 
-// Sleep is a no-op; DPI panels have no sleep command (backlight is OS-managed).
-func (d *LCDDPI) Sleep() error { return nil }
+// Sleep blanks the framebuffer display via sysfs.
+func (d *LCDDPI) Sleep() error {
+	return os.WriteFile(d.blankPath, []byte("1"), 0)
+}
+
+// Wake unblanks the framebuffer display via sysfs.
+func (d *LCDDPI) Wake() error {
+	return os.WriteFile(d.blankPath, []byte("0"), 0)
+}
 
 // Clear fills the framebuffer with white (0xFF bytes).
 func (d *LCDDPI) Clear() error {
@@ -111,15 +121,14 @@ func (d *LCDDPI) DisplayFrame(img *image.Gray) error {
 }
 
 // writeRGB565 packs each gray pixel into a 16-bit RGB565 value.
-// Because R=G=B the result is the same for both RGB and BGR byte orders.
 func (d *LCDDPI) writeRGB565(img *image.Gray, bounds image.Rectangle) {
 	idx := 0
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			g := img.GrayAt(x, y).Y
 			r5 := uint16(g >> 3)
-			g6 := uint16(g >> 2)
-			b5 := uint16(g >> 3)
+			g6 := uint16(g) * 63 / 255
+			b5 := r5
 			val := (r5 << 11) | (g6 << 5) | b5
 			d.buf[idx] = uint8(val)
 			d.buf[idx+1] = uint8(val >> 8)
@@ -134,10 +143,10 @@ func (d *LCDDPI) writeXRGB8888(img *image.Gray, bounds image.Rectangle) {
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			g := img.GrayAt(x, y).Y
-			d.buf[idx] = g   // B
-			d.buf[idx+1] = g // G
-			d.buf[idx+2] = g // R
-			d.buf[idx+3] = 0 // X
+			d.buf[idx] = g    // B
+			d.buf[idx+1] = g  // G
+			d.buf[idx+2] = g  // R
+			d.buf[idx+3] = 0xFF // A/X — set fully opaque in case format is ARGB
 			idx += 4
 		}
 	}

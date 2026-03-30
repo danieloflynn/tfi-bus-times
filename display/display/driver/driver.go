@@ -17,9 +17,11 @@ type Driver interface {
 	// Clear fills the display with white.
 	Clear() error
 
-	// Sleep puts the controller into deep-sleep mode (lowest power).
-	// A hardware reset is required to wake it.
+	// Sleep puts the display into low-power mode (e.g. blanks backlight).
 	Sleep() error
+
+	// Wake brings the display back from sleep.
+	Wake() error
 
 	// Width returns the display width in pixels.
 	Width() int
