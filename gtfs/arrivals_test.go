@@ -253,6 +253,35 @@ func TestQueryArrivalsRouteFilter(t *testing.T) {
 	}
 }
 
+// TestMinutesUntilStaleBug documents the root cause of the stale-feed-time display
+// bug: MinutesUntil measures from whatever 'now' is passed to it. When the caller
+// mistakenly passes a stale feedTime instead of the actual wall clock, buses that
+// are only a few minutes away appear to be 100+ minutes away (capped to "99 min").
+//
+// This test runs on both the pre-fix and post-fix codebase — it exercises
+// Arrival.MinutesUntil directly, not the renderer. Run it before and after applying
+// the PR to confirm the mechanism and that the method itself is unchanged.
+func TestMinutesUntilStaleBug(t *testing.T) {
+	realNow := time.Date(2025, 1, 10, 22, 0, 0, 0, time.UTC)
+	staleFeedTime := realNow.Add(-2 * time.Hour) // feed last parsed at 20:00
+
+	a := Arrival{ScheduledTime: realNow.Add(5 * time.Minute)} // bus due at 22:05
+
+	// Correct behaviour (post-fix): MinutesUntil receives the actual wall clock.
+	minsCorrect := a.MinutesUntil(realNow)
+	if minsCorrect != 5 {
+		t.Errorf("MinutesUntil(realNow) = %d, want 5", minsCorrect)
+	}
+
+	// Bug behaviour (pre-fix): MinutesUntil receives the stale feed timestamp.
+	// The bus is 22:05 − 20:00 = 125 minutes from feedTime, which exceeds the
+	// 99-min display cap — so the board shows "99 min" for a bus only 5 min away.
+	minsBug := a.MinutesUntil(staleFeedTime)
+	if minsBug <= 99 {
+		t.Errorf("MinutesUntil(staleFeedTime) = %d, want > 99 (stale-time bug demo)", minsBug)
+	}
+}
+
 // TestParseGTFSTime verifies overnight time parsing.
 func TestParseGTFSTime(t *testing.T) {
 	cases := []struct {
