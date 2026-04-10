@@ -40,7 +40,7 @@ func TestRenderPreview(t *testing.T) {
 		},
 	}
 
-	img := display.Render(sections, now, 1024, 600)
+	img := display.Render(sections, now, now, 1024, 600)
 
 	if err := os.MkdirAll("../mock_output", 0o755); err != nil {
 		t.Fatal(err)

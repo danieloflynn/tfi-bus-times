@@ -235,7 +235,7 @@ func renderAndDisplay(
 		sections[i] = display.StopSection{Label: s.Label, Arrivals: arr}
 	}
 
-	img := display.Render(sections, updated, drv.Width(), drv.Height())
+	img := display.Render(sections, now, updated, drv.Width(), drv.Height())
 	if err := drv.DisplayFrame(img); err != nil {
 		slog.Error("display frame", "err", err)
 	} else {
