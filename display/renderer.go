@@ -57,9 +57,9 @@ const hdMinWidth = 800
 // Render draws arrival sections onto a new *image.Gray of the given width/height.
 // On small displays (< hdMinWidth) all sections are merged into one sorted list.
 // On HD displays each section gets its own labelled band.
-func Render(sections []StopSection, now time.Time, width, height int) *image.Gray {
+func Render(sections []StopSection, now, feedTime time.Time, width, height int) *image.Gray {
 	if width >= hdMinWidth {
-		return renderHD(sections, now, width, height)
+		return renderHD(sections, now, feedTime, width, height)
 	}
 
 	// --- Small-display path: flatten all sections into one sorted list ---
@@ -91,7 +91,7 @@ func Render(sections []StopSection, now time.Time, width, height int) *image.Gra
 	}
 
 	// Header line.
-	updated := "Updated: " + now.Format("15:04")
+	updated := "Updated: " + feedTime.Format("15:04")
 	headerText := "STOP: " + stopLabel
 	drawText(img, headerText, 2, headerHeight-2, black)
 	drawTextRight(img, updated, width-2, headerHeight-2, black)

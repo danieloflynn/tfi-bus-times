@@ -52,7 +52,7 @@ func RowsPerSection(numSections, width, height int) int {
 // renderHD draws per-stop sections onto a large display image.
 // Each section gets a labelled header bar followed by its arrival rows.
 // Available height is divided evenly between sections.
-func renderHD(sections []StopSection, now time.Time, width, height int) *image.Gray {
+func renderHD(sections []StopSection, now, feedTime time.Time, width, height int) *image.Gray {
 	// Scale column x-coordinates proportionally from the 1872-px base layout.
 	s := float64(width) / 1872.0
 	sc := func(base int) int { return int(math.Round(float64(base) * s)) }
@@ -66,7 +66,7 @@ func renderHD(sections []StopSection, now time.Time, width, height int) *image.G
 
 	// Top header: timestamp.
 	headerBaseline := (hdHeaderHeight + fonts.HeaderFace.Metrics().Ascent.Ceil()) / 2
-	updated := "Updated: " + now.Format("15:04:05")
+	updated := "Updated: " + feedTime.Format("15:04:05")
 	hdDrawTextRight(img, updated, width-4, headerBaseline, white, fonts.HeaderFace)
 
 	if len(sections) == 0 {
