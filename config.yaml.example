@@ -1,8 +1,8 @@
 # TFI Bus Display — example configuration
-# Copy to config.yaml and fill in your API key.
-# Get a free API key from https://developer.nationaltransport.ie/
-
-api_key: "your-api-key-here"
+# Copy to /etc/tfi-display/config.yaml and edit to suit your setup.
+#
+# API key lives in a separate file: see secrets.yaml.example.
+# Do NOT add api_key here — it will be ignored if secrets.yaml is present.
 
 # -----------------------------------------------------------------------
 # Bus stops to monitor.  stop_number is the number printed on the stop.

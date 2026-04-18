@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -33,8 +34,13 @@ type Config struct {
 	StopTime          string       `yaml:"stop_time"`  // e.g. "22:00" — display powers off
 }
 
-// Load reads and validates a YAML config file, applying defaults.
-func Load(path string) (*Config, error) {
+type secretsFile struct {
+	APIKey string `yaml:"api_key"`
+}
+
+// loadFile reads and parses a YAML config file, applies defaults, and validates
+// structure (schedule times, stops). It does NOT validate api_key.
+func loadFile(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config %q: %w", path, err)
@@ -74,6 +80,7 @@ func Load(path string) (*Config, error) {
 			cfg.DataDir = filepath.Join(os.TempDir(), "tfi-display")
 		}
 	}
+
 	// Schedule validation: both must be set, or neither.
 	if (cfg.StartTime == "") != (cfg.StopTime == "") {
 		return nil, fmt.Errorf("start_time and stop_time must both be set or both be unset")
@@ -87,10 +94,6 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
-	// Validation
-	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("api_key is required")
-	}
 	if len(cfg.Stops) == 0 {
 		return nil, fmt.Errorf("at least one stop must be configured")
 	}
@@ -101,4 +104,63 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// Load reads and validates a single YAML config file (may include api_key), applying defaults.
+// Preserved for tests and one-file setups.
+func Load(path string) (*Config, error) {
+	cfg, err := loadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.APIKey == "" {
+		return nil, fmt.Errorf("api_key is required")
+	}
+	return cfg, nil
+}
+
+// LoadWithSecrets loads config.yaml then sources api_key from (in priority order):
+//  1. secretsPath file, if non-empty and the file exists
+//  2. TFI_API_KEY environment variable
+//  3. api_key field already present in config.yaml (transitional compat)
+//
+// Returns an error if api_key is still empty after all sources.
+// A missing secrets file is non-fatal; a malformed one is an error.
+func LoadWithSecrets(configPath, secretsPath string) (*Config, error) {
+	cfg, err := loadFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// 1. Secrets file (highest priority — overrides any key baked into config.yaml)
+	if secretsPath != "" {
+		data, err := os.ReadFile(secretsPath)
+		if err == nil {
+			var s secretsFile
+			if err := yaml.Unmarshal(data, &s); err != nil {
+				return nil, fmt.Errorf("parsing secrets file %q: %w", secretsPath, err)
+			}
+			if s.APIKey != "" {
+				cfg.APIKey = s.APIKey
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("reading secrets file %q: %w", secretsPath, err)
+		} else {
+			log.Printf("secrets file %q not found, falling back to TFI_API_KEY env var or config file", secretsPath)
+		}
+	}
+
+	// 2. Environment variable (overrides config.yaml but not secrets file)
+	if cfg.APIKey == "" {
+		if key := os.Getenv("TFI_API_KEY"); key != "" {
+			cfg.APIKey = key
+		}
+	}
+
+	// 3. api_key in config.yaml is already in cfg.APIKey from loadFile (transitional compat)
+
+	if cfg.APIKey == "" {
+		return nil, fmt.Errorf("api_key is required: set in %s or TFI_API_KEY env var", secretsPath)
+	}
+	return cfg, nil
 }
