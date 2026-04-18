@@ -69,7 +69,7 @@ Optional fields: `routes` (filter by route short name), `poll_interval_seconds` 
 
 **Prerequisites:** Go installed on your development machine, SSH access to the Pi.
 
-1. Update `PI_HOST` in the `Makefile` (default: `dan@192.168.0.149`).
+1. Update `PI_HOST` in the `Makefile`.
 2. Run:
 
 ```sh
