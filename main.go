@@ -16,6 +16,7 @@ import (
 
 func main() {
 	cfgPath := flag.String("config", "config.yaml", "path to config.yaml")
+	secretsPath := flag.String("secrets", "/etc/tfi-display/secrets.yaml", "path to secrets.yaml (api_key)")
 	mock := flag.Bool("mock", false, "use mock display driver (writes PNG files)")
 	mockDir := flag.String("mock-dir", "mock_output", "directory for mock PNG frames")
 	verbose := flag.Bool("v", false, "enable debug logging")
@@ -27,7 +28,7 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
-	cfg, err := config.Load(*cfgPath)
+	cfg, err := config.LoadWithSecrets(*cfgPath, *secretsPath)
 	if err != nil {
 		slog.Error("loading config", "err", err)
 		os.Exit(1)

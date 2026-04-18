@@ -21,7 +21,11 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 ## Architecture
 
-**`config/`** — YAML config loading with defaults and validation. `Config` is the single source of truth for all runtime settings. `config.yaml` is gitignored; `config.yaml.example` is the reference.
+**`config/`** — YAML config loading with defaults and validation. `Config` is the single source of truth for all runtime settings. `config.yaml` is gitignored; `config.yaml.example` is the reference. `LoadWithSecrets(configPath, secretsPath)` is the production entry point: it reads `api_key` from `secrets.yaml` first, then `TFI_API_KEY` env var, then falls back to `api_key` in `config.yaml`. `Load(path)` is preserved for tests that supply a complete single-file config.
+
+**`updater/`** — Binary install logic for `tfi-updater`. `Run(Config)` finds a staged `tfi-display` binary in `StagingDir`, backs up the existing install to `<target>.prev`, atomically installs the new binary, restarts the systemd service, and rolls back on failure. `DefaultConfig()` uses `os.Executable()` to set `StagingDir` to the updater's own directory.
+
+**`cmd/updater/`** — Entry point for the `tfi-updater` binary. Thin wrapper around the `updater` package.
 
 **`gtfs/`** — All GTFS logic:
 - `static.go` — downloads the TFI GTFS ZIP, parses it into a `StaticDB` (stops, trips, services, calendar exceptions), and caches it as a gob file. Cache is invalidated by the upstream `Last-Modified` header or a schema version bump.
@@ -57,6 +61,10 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 **Display sleep/wake** — When `start_time`/`stop_time` are set, the display sleeps outside active hours. The schedule ticker fires every minute to check `isActiveTime`. Overnight ranges (e.g. 22:00–06:00) are supported.
 
+**Secrets/config split** — `api_key` is kept in `/etc/tfi-display/secrets.yaml` (mode 600, root-only), separate from the main `config.yaml` so config can be distributed remotely without exposing secrets. `LoadWithSecrets` merges both at startup. The updater never writes `secrets.yaml`.
+
+**Atomic binary install** — `updater.installBinary` writes to `<target>.new` first, sets mode 0755, then `os.Rename` into place. On Linux, rename within the same filesystem is atomic, so the running binary is never partially overwritten. The previous binary is preserved at `<target>.prev` for one-step rollback.
+
 **Non-obvious code must have comments** — whenever a piece of code does something that isn't immediately clear from reading it (e.g. the 12-hour overnight rule, BOM stripping in CSV headers, backoff logic), add an inline comment explaining _why_, not just _what_. Also update this file to document any new patterns introduced.
 
 ---
@@ -64,12 +72,14 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 ## Dev Commands
 
 ```sh
-make build        # build binary for the current host → build/
-make build-pi     # cross-compile ARM64 Linux binary for Pi Zero 2W
-make test         # go test ./...
-make run-mock     # run locally with mock display (PNG output → mock_output/)
-make deploy       # build-pi + scp binary + service to Pi, enable & start
-make preview      # render one preview PNG from fixture data (no API key needed)
+make build              # build tfi-display binary for the current host → build/
+make build-pi           # cross-compile ARM64 Linux tfi-display for Pi Zero 2W
+make build-updater-pi   # cross-compile ARM64 Linux tfi-updater for Pi Zero 2W
+make test               # go test ./...
+make run-mock           # run locally with mock display (PNG output → mock_output/)
+make deploy             # build-pi + scp tfi-display + service to Pi, enable & start
+make deploy-updater     # build both binaries, deploy via tfi-updater (no manual SSH restart)
+make preview            # render one preview PNG from fixture data (no API key needed)
 ```
 
 Update `PI_HOST` in `Makefile` before deploying.
@@ -79,15 +89,22 @@ Update `PI_HOST` in `Makefile` before deploying.
 ## Configuration
 
 ```sh
-cp config.yaml.example config.yaml
-# Edit api_key and stops, at minimum
+# On Pi (one-time setup):
+sudo cp secrets.yaml.example /etc/tfi-display/secrets.yaml
+# Edit /etc/tfi-display/secrets.yaml — set api_key
+sudo chown root:root /etc/tfi-display/secrets.yaml && sudo chmod 600 /etc/tfi-display/secrets.yaml
+
+sudo cp config.yaml.example /etc/tfi-display/config.yaml
+# Edit /etc/tfi-display/config.yaml — set stops, routes, etc.
 ```
+
+**Secrets vs config split**: `api_key` lives in `/etc/tfi-display/secrets.yaml` (root-only, never touched by the updater). All other settings live in `config.yaml`. The binary is started with both `-config` and `-secrets` flags; see `tfi-display.service`.
 
 Key fields:
 
 | Field                          | Default       | Notes                                               |
 | ------------------------------ | ------------- | --------------------------------------------------- |
-| `api_key`                      | —             | Required. Register at nationaltransport.ie          |
+| `api_key`                      | —             | **In `secrets.yaml` only.** Register at nationaltransport.ie |
 | `stops`                        | —             | Required. List of `stop_number` + `label`           |
 | `routes`                       | (all)         | Optional whitelist of route short names             |
 | `poll_interval_seconds`        | 60            | How often to fetch live data                        |

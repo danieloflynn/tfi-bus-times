@@ -1,0 +1,14 @@
+[Unit]
+Description=TFI Display Binary Updater
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/tfi-updater
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tfi-updater
+
+[Install]
+WantedBy=multi-user.target
