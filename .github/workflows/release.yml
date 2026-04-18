@@ -19,7 +19,7 @@ jobs:
       - name: Build Pi binary
         run: |
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-            go build -ldflags="-s -w" -o build/tfi-display-linux-arm64 ./...
+            go build -ldflags="-s -w" -o build/tfi-display-linux-arm64 .
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
