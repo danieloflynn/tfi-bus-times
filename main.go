@@ -207,7 +207,7 @@ func renderAndDisplay(
 	page int,
 ) {
 	now := time.Now()
-	updated := live.FeedTime()
+	updated := live.PollTime()
 	if updated.IsZero() {
 		updated = now
 	}

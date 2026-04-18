@@ -40,6 +40,7 @@ type LiveStore struct {
 	// stopNumber → []Addition
 	Additions    map[string][]Addition
 	LastFeedTime time.Time
+	LastPollTime time.Time
 }
 
 // NewLiveStore returns an initialised LiveStore.
@@ -51,11 +52,18 @@ func NewLiveStore() *LiveStore {
 	}
 }
 
-// FeedTime returns the timestamp of the last successful live data fetch.
+// FeedTime returns the feed header timestamp from the last successful parse.
 func (s *LiveStore) FeedTime() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.LastFeedTime
+}
+
+// PollTime returns the wall-clock time of the last successful poll.
+func (s *LiveStore) PollTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.LastPollTime
 }
 
 // GetDelay returns the StopDelay for tripID at or before stopSequence using
@@ -146,6 +154,10 @@ func (p *Poller) Poll() int {
 	p.rateLimitCount = 0
 	if err := p.parse(data); err != nil {
 		slog.Error("parsing realtime feed", "err", err)
+	} else {
+		p.store.mu.Lock()
+		p.store.LastPollTime = time.Now()
+		p.store.mu.Unlock()
 	}
 	return 0
 }
