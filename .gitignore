@@ -1,0 +1,4 @@
+config.yaml
+build/
+mock_output/
+.claude/settings.local.json
