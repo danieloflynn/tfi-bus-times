@@ -52,6 +52,19 @@ display_model: "lcd"
 # framebuffer_device: "/dev/fb0"
 
 # -----------------------------------------------------------------------
+# tfi-agent: how often (seconds) the agent checks the API for a new
+# binary release and updated config.  Default: 3600 (hourly).
+# -----------------------------------------------------------------------
+# update_interval_seconds: 3600
+
+# -----------------------------------------------------------------------
+# tfi-agent: the dandev API origin the agent talks to. Overrides the URL
+# baked in at build time (AGENT_BASE_URL); set it here if you didn't bake
+# one in. Required for the agent to do anything.
+# -----------------------------------------------------------------------
+# update_base_url: "https://your-instance.example.com"
+
+# -----------------------------------------------------------------------
 # Wake/sleep schedule (optional).  If set, the display is powered off
 # outside the active window, saving backlight wear overnight.
 # Both fields must be set together; omit both to run 24/7 (default).

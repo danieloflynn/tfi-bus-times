@@ -23,9 +23,11 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 **`config/`** — YAML config loading with defaults and validation. `Config` is the single source of truth for all runtime settings. `config.yaml` is gitignored; `config.yaml.example` is the reference. `LoadWithSecrets(configPath, secretsPath)` is the production entry point: it reads `api_key` from `secrets.yaml` first, then `TFI_API_KEY` env var, then falls back to `api_key` in `config.yaml`. `Load(path)` is preserved for tests that supply a complete single-file config.
 
-**`updater/`** — Binary install logic for `tfi-updater`. `Run(Config)` finds a staged `tfi-display` binary in `StagingDir`, backs up the existing install to `<target>.prev`, atomically installs the new binary, restarts the systemd service, and rolls back on failure. `DefaultConfig()` uses `os.Executable()` to set `StagingDir` to the updater's own directory.
+**`updater/`** — Low-level install logic (used by the agent). `Run(Config)` finds a staged `tfi-display` binary in `StagingDir`, backs up the existing install to `<target>.prev`, atomically installs the new binary, restarts the systemd service, and rolls back on failure. `ApplyConfig(content, configPath, service, timeout)` does the same lifecycle for a config file: backup to `<path>.prev`, atomic write, restart, verify, rollback. `DefaultConfig()` uses `os.Executable()` to set `StagingDir` to the running binary's directory. This package never makes network calls.
 
-**`cmd/updater/`** — Entry point for the `tfi-updater` binary. Thin wrapper around the `updater` package.
+**`agent/`** — The `tfi-agent` foundation layer. `Run(ctx)` loops forever: each cycle it reloads settings, then independently (a) checks `GET /api/tfi/v1/latest` and, if the version *differs* from the local marker and isn't known-bad, downloads `download_url` and calls `updater.Run`; (b) fetches `GET /api/tfi/v1/config_files/fetch` (Bearer device token) and, if different from the on-disk config, calls `updater.ApplyConfig`. Failed binary installs are recorded locally and reported via `POST /api/tfi/v1/releases/report`. Deliberately decoupled from `config.LoadWithSecrets` — it reads only the fields it needs, leniently, so it keeps running even when the display config is broken.
+
+**`cmd/agent/`** — Entry point for the `tfi-agent` binary. Parses flags, builds the agent, and runs it under a SIGTERM-aware context.
 
 **`gtfs/`** — All GTFS logic:
 - `static.go` — downloads the TFI GTFS ZIP, parses it into a `StaticDB` (stops, trips, services, calendar exceptions), and caches it as a gob file. Cache is invalidated by the upstream `Last-Modified` header or a schema version bump.
@@ -61,9 +63,13 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 **Display sleep/wake** — When `start_time`/`stop_time` are set, the display sleeps outside active hours. The schedule ticker fires every minute to check `isActiveTime`. Overnight ranges (e.g. 22:00–06:00) are supported.
 
-**Secrets/config split** — `api_key` is kept in `/etc/tfi-display/secrets.yaml` (mode 600, root-only), separate from the main `config.yaml` so config can be distributed remotely without exposing secrets. `LoadWithSecrets` merges both at startup. The updater never writes `secrets.yaml`.
+**Secrets/config split** — `api_key` and the agent's `device_token` are kept in `/etc/tfi-display/secrets.yaml` (mode 600, root-only), separate from the main `config.yaml` so config can be distributed remotely without exposing secrets. `tfi-display` merges both via `LoadWithSecrets`; `tfi-agent` reads only `device_token`. The agent never *writes* `secrets.yaml`.
 
-**Atomic binary install** — `updater.installBinary` writes to `<target>.new` first, sets mode 0755, then `os.Rename` into place. On Linux, rename within the same filesystem is atomic, so the running binary is never partially overwritten. The previous binary is preserved at `<target>.prev` for one-step rollback.
+**Atomic binary install** — `updater.installBinary` writes to `<target>.new` first, sets mode 0755, then `os.Rename` into place. On Linux, rename within the same filesystem is atomic, so the running binary is never partially overwritten. The previous binary is preserved at `<target>.prev` for one-step rollback. `updater.writeFileAtomic` / `ApplyConfig` do the same for config files.
+
+**Agent update model** — the agent compares `/latest`'s version to a marker file (`/usr/local/bin/tfi-display.version`, written after a successful install) and installs whenever it *differs* — not just when newer — so a central rollback (re-pointing the release) propagates to devices. A version that fails to install is appended to `/var/lib/tfi-agent/bad-versions` (persisted across restarts) so it isn't retried every cycle, and is reported to the API. The poll interval comes from `update_interval_seconds` in `config.yaml` (default hourly, used whenever the file is missing/malformed), re-read each cycle, so a fetched config can change the cadence without an SSH visit. Binary updates need no secrets (`/latest` is public); only config sync and failure reporting use `device_token`.
+
+The API origin (`defaultBaseURL`) is deliberately empty in source — **this repo is public** — and injected at build time via `-ldflags -X tfi-display/agent.defaultBaseURL=...` (Makefile `AGENT_BASE_URL`), or set at runtime via `update_base_url` in `config.yaml`. If neither is set, the agent logs and skips. Never commit the real URL.
 
 **Non-obvious code must have comments** — whenever a piece of code does something that isn't immediately clear from reading it (e.g. the 12-hour overnight rule, BOM stripping in CSV headers, backoff logic), add an inline comment explaining _why_, not just _what_. Also update this file to document any new patterns introduced.
 
@@ -74,11 +80,11 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 ```sh
 make build              # build tfi-display binary for the current host → build/
 make build-pi           # cross-compile ARM64 Linux tfi-display for Pi Zero 2W
-make build-updater-pi   # cross-compile ARM64 Linux tfi-updater for Pi Zero 2W
+make build-agent-pi     # cross-compile ARM64 Linux tfi-agent for Pi Zero 2W
 make test               # go test ./...
 make run-mock           # run locally with mock display (PNG output → mock_output/)
 make deploy             # build-pi + scp tfi-display + service to Pi, enable & start
-make deploy-updater     # build both binaries, deploy via tfi-updater (no manual SSH restart)
+make deploy-agent       # install tfi-display + tfi-agent and start the agent service
 make preview            # render one preview PNG from fixture data (no API key needed)
 ```
 
@@ -91,14 +97,15 @@ Update `PI_HOST` in `Makefile` before deploying.
 ```sh
 # On Pi (one-time setup):
 sudo cp secrets.yaml.example /etc/tfi-display/secrets.yaml
-# Edit /etc/tfi-display/secrets.yaml — set api_key
+# Edit /etc/tfi-display/secrets.yaml — set api_key and device_token
+# (device_token = the "device key" copied from the dandev settings page)
 sudo chown root:root /etc/tfi-display/secrets.yaml && sudo chmod 600 /etc/tfi-display/secrets.yaml
 
 sudo cp config.yaml.example /etc/tfi-display/config.yaml
 # Edit /etc/tfi-display/config.yaml — set stops, routes, etc.
 ```
 
-**Secrets vs config split**: `api_key` lives in `/etc/tfi-display/secrets.yaml` (root-only, never touched by the updater). All other settings live in `config.yaml`. The binary is started with both `-config` and `-secrets` flags; see `tfi-display.service`.
+**Secrets vs config split**: `api_key` and `device_token` live in `/etc/tfi-display/secrets.yaml` (root-only, never written by the agent). All other settings live in `config.yaml`. `tfi-display` is started with both `-config` and `-secrets` flags (see `tfi-display.service`); `tfi-agent` takes the same flags (see `tfi-agent.service`).
 
 Key fields:
 

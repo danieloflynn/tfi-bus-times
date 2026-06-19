@@ -208,3 +208,71 @@ func TestRun_RollbackOnServiceFailure(t *testing.T) {
 		t.Errorf("after rollback target content %q, want %q", data, "v1")
 	}
 }
+
+// --- ApplyConfig ---
+
+func TestApplyConfig_HappyPath(t *testing.T) {
+	orig := systemctlCmd
+	t.Cleanup(func() { systemctlCmd = orig })
+	systemctlCmd = func(args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "is-active" {
+			return exec.Command("echo", "active")
+		}
+		return exec.Command("true")
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ApplyConfig([]byte("new"), configPath, "tfi-display", 5*time.Second); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("config missing: %v", err)
+	}
+	if string(data) != "new" {
+		t.Errorf("config content %q, want %q", data, "new")
+	}
+	// Previous content preserved for rollback.
+	prev, err := os.ReadFile(configPath + ".prev")
+	if err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	if string(prev) != "old" {
+		t.Errorf("backup content %q, want %q", prev, "old")
+	}
+}
+
+func TestApplyConfig_RollbackOnServiceFailure(t *testing.T) {
+	orig := systemctlCmd
+	t.Cleanup(func() { systemctlCmd = orig })
+	systemctlCmd = func(args ...string) *exec.Cmd {
+		if len(args) > 0 && args[0] == "is-active" {
+			return exec.Command("echo", "failed")
+		}
+		return exec.Command("true")
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("good"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ApplyConfig([]byte("bad"), configPath, "tfi-display", 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error after service failure")
+	}
+
+	// After rollback, config must contain the original "good" content.
+	data, err2 := os.ReadFile(configPath)
+	if err2 != nil {
+		t.Fatalf("config missing after rollback: %v", err2)
+	}
+	if string(data) != "good" {
+		t.Errorf("after rollback config content %q, want %q", data, "good")
+	}
+}
