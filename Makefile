@@ -36,16 +36,12 @@ deploy: build-pi
 	               sudo systemctl status tfi-display --no-pager"
 
 # Cross-compile the agent for Raspberry Pi Zero 2W (ARM64 Linux).
-# Set AGENT_BASE_URL to bake in your update server's origin, e.g.
-#   make build-agent-pi AGENT_BASE_URL=https://your-instance.example.com
-# Left blank here on purpose (public repo); without it, set update_base_url in
-# config.yaml instead.
-AGENT_BASE_URL ?=
+# The API origin is not baked in — set base_url in /etc/tfi-display/secrets.yaml.
 build-agent-pi: export GOOS=linux
 build-agent-pi: export GOARCH=arm64
 build-agent-pi: export CGO_ENABLED=0
 build-agent-pi:
-	go build -ldflags="-s -w -X tfi-display/agent.defaultBaseURL=$(AGENT_BASE_URL)" -o $(AGENT_BINARY)-linux-arm64 ./cmd/agent
+	go build -ldflags="-s -w" -o $(AGENT_BINARY)-linux-arm64 ./cmd/agent
 
 # Bootstrap/refresh the agent: install the display binary + the agent, register
 # and start the long-running tfi-agent service. From then on the agent keeps the

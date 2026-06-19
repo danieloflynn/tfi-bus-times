@@ -238,8 +238,8 @@ func TestCheckConfig_SkipsWithoutToken(t *testing.T) {
 
 func TestLoadSettings_Defaults(t *testing.T) {
 	s := loadSettings("/nonexistent/config.yaml", "/nonexistent/secrets.yaml")
-	if s.BaseURL != defaultBaseURL {
-		t.Errorf("BaseURL = %q, want default", s.BaseURL)
+	if s.BaseURL != "" {
+		t.Errorf("BaseURL = %q, want empty", s.BaseURL)
 	}
 	if s.Interval != defaultInterval {
 		t.Errorf("Interval = %s, want %s", s.Interval, defaultInterval)
@@ -253,8 +253,9 @@ func TestLoadSettings_Overrides(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 	sec := filepath.Join(dir, "secrets.yaml")
-	os.WriteFile(cfg, []byte("update_interval_seconds: 120\nupdate_base_url: https://example.test\n"), 0644)
-	os.WriteFile(sec, []byte("device_token: tok-123\n"), 0644)
+	// Interval comes from config.yaml; base_url + device_token from secrets.yaml.
+	os.WriteFile(cfg, []byte("update_interval_seconds: 120\n"), 0644)
+	os.WriteFile(sec, []byte("base_url: https://example.test\ndevice_token: tok-123\n"), 0644)
 
 	s := loadSettings(cfg, sec)
 	if s.BaseURL != "https://example.test" {

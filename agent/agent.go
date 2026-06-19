@@ -31,13 +31,6 @@ import (
 	"tfi-display/updater"
 )
 
-// defaultBaseURL is the update server origin. It is intentionally empty in
-// source (this repo is public) and injected at build time via
-// -ldflags "-X tfi-display/agent.defaultBaseURL=<url>" (see the Makefile's
-// AGENT_BASE_URL). It can also be overridden at runtime by update_base_url in
-// config.yaml. If neither is set, the agent logs and skips network work.
-var defaultBaseURL = ""
-
 const (
 	// defaultInterval is the poll cadence used until config.yaml sets one.
 	defaultInterval = time.Hour
@@ -116,7 +109,7 @@ func (a *Agent) Run(ctx context.Context) error {
 // a config edit must not wait on a binary release, and vice versa.
 func (a *Agent) cycle() {
 	if a.baseURL == "" {
-		log.Printf("tfi-agent: no API base URL configured (build with AGENT_BASE_URL or set update_base_url) — skipping")
+		log.Printf("tfi-agent: no base_url configured in secrets.yaml — skipping")
 		return
 	}
 	if err := a.checkBinary(); err != nil {
@@ -130,11 +123,11 @@ func (a *Agent) cycle() {
 // --- settings ---
 
 type fileSettings struct {
-	UpdateIntervalSec int    `yaml:"update_interval_seconds"`
-	UpdateBaseURL     string `yaml:"update_base_url"`
+	UpdateIntervalSec int `yaml:"update_interval_seconds"`
 }
 
 type secretSettings struct {
+	BaseURL     string `yaml:"base_url"`
 	DeviceToken string `yaml:"device_token"`
 }
 
@@ -153,29 +146,31 @@ func (a *Agent) reloadSettings() {
 
 // loadSettings reads only the fields the agent needs, leniently: missing or
 // unparseable files fall back to defaults rather than stopping the agent.
+//
+// base_url and device_token come from secrets.yaml — the one file the agent
+// never overwrites, so the API origin survives config syncs. The poll interval
+// lives in config.yaml so it can be managed centrally (and re-read each cycle).
 func loadSettings(configPath, secretsPath string) settings {
-	s := settings{BaseURL: defaultBaseURL, Interval: defaultInterval}
+	s := settings{Interval: defaultInterval}
 
 	if data, err := os.ReadFile(configPath); err == nil {
 		var fs fileSettings
 		if err := yaml.Unmarshal(data, &fs); err == nil {
-			if fs.UpdateBaseURL != "" {
-				s.BaseURL = fs.UpdateBaseURL
-			}
 			if fs.UpdateIntervalSec > 0 {
 				s.Interval = time.Duration(fs.UpdateIntervalSec) * time.Second
 			}
 		} else {
-			log.Printf("tfi-agent: parsing %s for settings: %v (using defaults)", configPath, err)
+			log.Printf("tfi-agent: parsing %s for interval: %v (using default)", configPath, err)
 		}
 	}
 
 	if data, err := os.ReadFile(secretsPath); err == nil {
 		var ss secretSettings
 		if err := yaml.Unmarshal(data, &ss); err == nil {
+			s.BaseURL = ss.BaseURL
 			s.DeviceToken = ss.DeviceToken
 		} else {
-			log.Printf("tfi-agent: parsing %s for device_token: %v", secretsPath, err)
+			log.Printf("tfi-agent: parsing %s for base_url/device_token: %v", secretsPath, err)
 		}
 	}
 
