@@ -163,6 +163,56 @@ func waitForActive(name string, timeout time.Duration) error {
 	return fmt.Errorf("timed out waiting for %s to become active", name)
 }
 
+// ApplyConfig atomically writes new config content to configPath and restarts
+// the service to pick it up, mirroring the binary update lifecycle:
+// backup existing → write → restart → verify → rollback on failure.
+//
+// The previous config is preserved at configPath+".prev" for one-step rollback,
+// matching the binary backup convention.
+func ApplyConfig(content []byte, configPath, serviceName string, timeout time.Duration) error {
+	if err := backupBinary(configPath); err != nil {
+		return fmt.Errorf("backup config: %w", err)
+	}
+
+	if err := writeFileAtomic(configPath, content, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	log.Printf("wrote new config → %s", configPath)
+
+	if err := restartService(serviceName); err != nil {
+		log.Printf("restart after config change failed: %v — rolling back", err)
+		if rbErr := rollback(configPath, serviceName); rbErr != nil {
+			return fmt.Errorf("rollback after restart failure: %w (restart error: %v)", rbErr, err)
+		}
+		return fmt.Errorf("restart: %w", err)
+	}
+
+	if err := waitForActive(serviceName, timeout); err != nil {
+		log.Printf("service not healthy after config change: %v — rolling back", err)
+		if rbErr := rollback(configPath, serviceName); rbErr != nil {
+			return fmt.Errorf("rollback after failed start: %w (original: %v)", rbErr, err)
+		}
+		return fmt.Errorf("service failed to become active after config change: %w", err)
+	}
+
+	log.Printf("service %s is active — config update complete", serviceName)
+	return nil
+}
+
+// writeFileAtomic writes data to path via a ".new" staging file and renames it
+// into place, so a reader never observes a partially written file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".new"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return fmt.Errorf("write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("rename %s → %s: %w", tmp, path, err)
+	}
+	return nil
+}
+
 // copyFile copies src to dst, creating or truncating dst.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)

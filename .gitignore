@@ -1,4 +1,5 @@
 config.yaml
+secrets.yaml
 build/
 mock_output/
 .claude/settings.local.json

@@ -1,0 +1,22 @@
+[Unit]
+Description=TFI Display Agent (binary + config updater)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+StateDirectory=tfi-agent
+ExecStart=/usr/local/bin/tfi-agent -config /etc/tfi-display/config.yaml -secrets /etc/tfi-display/secrets.yaml
+Restart=always
+RestartSec=30s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# Logging via journald.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tfi-agent
+
+[Install]
+WantedBy=multi-user.target

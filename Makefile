@@ -1,9 +1,9 @@
 PI_HOST ?= pi@192.168.0.1
 PI_CONFIG_DIR ?= /etc/tfi-display
 BINARY := build/tfi-display
-UPDATER_BINARY := build/tfi-updater
+AGENT_BINARY := build/tfi-agent
 
-.PHONY: build build-pi build-updater-pi deploy deploy-updater test clean preview run-mock
+.PHONY: build build-pi build-agent-pi deploy deploy-agent test clean preview run-mock
 
 # Build for the current host (useful for -mock runs on a laptop).
 build:
@@ -35,22 +35,28 @@ deploy: build-pi
 	               sudo systemctl enable --now tfi-display && \
 	               sudo systemctl status tfi-display --no-pager"
 
-# Cross-compile updater for Raspberry Pi Zero 2W (ARM64 Linux).
-build-updater-pi: export GOOS=linux
-build-updater-pi: export GOARCH=arm64
-build-updater-pi: export CGO_ENABLED=0
-build-updater-pi:
-	go build -ldflags="-s -w" -o $(UPDATER_BINARY)-linux-arm64 ./cmd/updater
+# Cross-compile the agent for Raspberry Pi Zero 2W (ARM64 Linux).
+# Set AGENT_BASE_URL to bake in the dandev API origin, e.g.
+#   make build-agent-pi AGENT_BASE_URL=https://your-instance.example.com
+# Left blank here on purpose (public repo); without it, set update_base_url in
+# config.yaml instead.
+AGENT_BASE_URL ?=
+build-agent-pi: export GOOS=linux
+build-agent-pi: export GOARCH=arm64
+build-agent-pi: export CGO_ENABLED=0
+build-agent-pi:
+	go build -ldflags="-s -w -X tfi-display/agent.defaultBaseURL=$(AGENT_BASE_URL)" -o $(AGENT_BINARY)-linux-arm64 ./cmd/agent
 
-# Deploy both binaries: scp to /tmp/, run updater from /tmp/ (staging dir),
-# then install updater to /usr/local/bin/ and register the systemd unit.
-deploy-updater: build-pi build-updater-pi
+# Bootstrap/refresh the agent: install the display binary + the agent, register
+# and start the long-running tfi-agent service. From then on the agent keeps the
+# display binary and config in sync on its own — no further SSH needed.
+deploy-agent: build-pi build-agent-pi
 	scp $(BINARY)-linux-arm64 $(PI_HOST):/tmp/tfi-display
-	scp $(UPDATER_BINARY)-linux-arm64 $(PI_HOST):/tmp/tfi-updater
-	ssh $(PI_HOST) "sudo chmod +x /tmp/tfi-updater && sudo /tmp/tfi-updater"
-	ssh $(PI_HOST) "sudo install -m 0755 /tmp/tfi-updater /usr/local/bin/tfi-updater"
-	scp tfi-updater.service $(PI_HOST):/tmp/tfi-updater.service
-	ssh $(PI_HOST) "sudo mv /tmp/tfi-updater.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable tfi-updater"
+	ssh $(PI_HOST) "sudo install -m 0755 /tmp/tfi-display /usr/local/bin/tfi-display"
+	scp $(AGENT_BINARY)-linux-arm64 $(PI_HOST):/tmp/tfi-agent
+	ssh $(PI_HOST) "sudo install -m 0755 /tmp/tfi-agent /usr/local/bin/tfi-agent"
+	scp tfi-agent.service $(PI_HOST):/tmp/tfi-agent.service
+	ssh $(PI_HOST) "sudo mv /tmp/tfi-agent.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now tfi-agent && sudo systemctl status tfi-agent --no-pager"
 
 # Run mock display locally (writes PNG frames to mock_output/).
 # TFI_API_KEY=dummy avoids needing api_key in config.yaml.example.
