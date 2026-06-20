@@ -36,7 +36,7 @@ deploy: build-pi
 	               sudo systemctl status tfi-display --no-pager"
 
 # Cross-compile the agent for Raspberry Pi Zero 2W (ARM64 Linux).
-# Set AGENT_BASE_URL to bake in the dandev API origin, e.g.
+# Set AGENT_BASE_URL to bake in your update server's origin, e.g.
 #   make build-agent-pi AGENT_BASE_URL=https://your-instance.example.com
 # Left blank here on purpose (public repo); without it, set update_base_url in
 # config.yaml instead.

@@ -98,7 +98,8 @@ Update `PI_HOST` in `Makefile` before deploying.
 # On Pi (one-time setup):
 sudo cp secrets.yaml.example /etc/tfi-display/secrets.yaml
 # Edit /etc/tfi-display/secrets.yaml — set api_key and device_token
-# (device_token = the "device key" copied from the dandev settings page)
+# (device_token = the per-device key issued by your update server, if you
+# run one — device_token is only needed for the optional tfi-agent)
 sudo chown root:root /etc/tfi-display/secrets.yaml && sudo chmod 600 /etc/tfi-display/secrets.yaml
 
 sudo cp config.yaml.example /etc/tfi-display/config.yaml

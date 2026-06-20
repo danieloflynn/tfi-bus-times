@@ -1,6 +1,12 @@
 // Package agent is the tfi-agent foundation layer: a long-running process that
-// periodically syncs the tfi-display binary and its config from the dandev API,
-// delegating the risky install/restart/rollback work to the updater package.
+// periodically syncs the tfi-display binary and its config from a self-hosted
+// update server, delegating the risky install/restart/rollback work to the
+// updater package.
+//
+// This is entirely optional. tfi-display runs standalone with no network
+// dependency beyond the TFI API itself; tfi-agent is a separate binary for
+// anyone who wants to run their own update server and push releases to
+// multiple devices. See README.md for the API contract it expects.
 //
 // It is deliberately decoupled from the display's own config validation — the
 // agent must keep running (and keep fetching) even when the on-disk config is
@@ -25,8 +31,8 @@ import (
 	"tfi-display/updater"
 )
 
-// defaultBaseURL is the dandev API origin. It is intentionally empty in source
-// (this repo is public) and injected at build time via
+// defaultBaseURL is the update server origin. It is intentionally empty in
+// source (this repo is public) and injected at build time via
 // -ldflags "-X tfi-display/agent.defaultBaseURL=<url>" (see the Makefile's
 // AGENT_BASE_URL). It can also be overridden at runtime by update_base_url in
 // config.yaml. If neither is set, the agent logs and skips network work.

@@ -58,9 +58,11 @@ display_model: "lcd"
 # update_interval_seconds: 3600
 
 # -----------------------------------------------------------------------
-# tfi-agent: the dandev API origin the agent talks to. Overrides the URL
-# baked in at build time (AGENT_BASE_URL); set it here if you didn't bake
-# one in. Required for the agent to do anything.
+# tfi-agent: the update server origin the agent talks to. tfi-agent is an
+# optional, separate binary for self-hosted auto-updates (see README.md) —
+# tfi-display itself never reads this field. Overrides the URL baked in at
+# build time (AGENT_BASE_URL); set it here if you didn't bake one in.
+# Required for the agent to do anything.
 # -----------------------------------------------------------------------
 # update_base_url: "https://your-instance.example.com"
 
