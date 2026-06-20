@@ -52,7 +52,7 @@ deploy-agent: build-pi build-agent-pi
 	scp $(AGENT_BINARY)-linux-arm64 $(PI_HOST):/tmp/tfi-agent
 	ssh $(PI_HOST) "sudo install -m 0755 /tmp/tfi-agent /usr/local/bin/tfi-agent"
 	scp tfi-agent.service $(PI_HOST):/tmp/tfi-agent.service
-	ssh $(PI_HOST) "sudo mv /tmp/tfi-agent.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now tfi-agent && sudo systemctl status tfi-agent --no-pager"
+	ssh $(PI_HOST) "sudo mv /tmp/tfi-agent.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable tfi-agent && sudo systemctl restart tfi-agent && sudo systemctl status tfi-agent --no-pager"
 
 # Run mock display locally (writes PNG frames to mock_output/).
 # TFI_API_KEY=dummy avoids needing api_key in config.yaml.example.
