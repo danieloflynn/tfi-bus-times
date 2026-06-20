@@ -14,7 +14,7 @@ import (
 	"tfi-display/updater"
 )
 
-// testServer is a configurable stand-in for the dandev API.
+// testServer is a configurable stand-in for the update server API.
 type testServer struct {
 	latestVersion string
 	downloadBody  string

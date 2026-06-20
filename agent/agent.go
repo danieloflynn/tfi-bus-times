@@ -41,9 +41,9 @@ const (
 	defaultBadVersionsFile = "/var/lib/tfi-agent/bad-versions"
 	binaryName             = "tfi-display"
 	httpTimeout            = 30 * time.Second
-	// defaultRetryAttempts/Delay ride out the 502s fly returns while a
-	// scale-to-zero machine cold-starts: the first request triggers the start,
-	// and a retry a few seconds later hits the now-running app.
+	// defaultRetryAttempts/Delay ride out the 502s a scale-to-zero host (e.g.
+	// fly.io, Cloud Run) returns while it cold-starts: the first request triggers
+	// the start, and a retry a few seconds later hits the now-running app.
 	defaultRetryAttempts = 4
 	defaultRetryDelay    = 5 * time.Second
 )
@@ -189,8 +189,8 @@ func loadSettings(configPath, secretsPath string) settings {
 // --- http with retry ---
 
 // doWithRetry sends the request built by newReq, retrying on network errors and
-// 5xx responses. The dandev app runs scale-to-zero on fly, so a stopped machine
-// 502s the first (waking) request; a retry a few seconds later succeeds. newReq
+// 5xx responses. A scale-to-zero update server stops when idle, so it 502s the
+// first (waking) request; a retry a few seconds later succeeds. newReq
 // is a factory because each attempt needs a fresh request (and body reader).
 //
 // A returned response is the caller's to close. 4xx responses are returned
