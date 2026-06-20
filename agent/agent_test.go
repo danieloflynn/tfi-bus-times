@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,7 +14,7 @@ import (
 	"tfi-display/updater"
 )
 
-// testServer is a configurable stand-in for the dandev API.
+// testServer is a configurable stand-in for the update server API.
 type testServer struct {
 	latestVersion string
 	downloadBody  string
@@ -67,6 +68,8 @@ func newTestAgent(t *testing.T, baseURL string) (*Agent, *fakeUpdater) {
 		serviceName:     "tfi-display",
 		waitTimeout:     time.Second,
 		http:            &http.Client{Timeout: 5 * time.Second},
+		retryAttempts:   4,
+		retryDelay:      time.Millisecond,
 		runUpdate:       fu.run,
 		applyConfig:     fu.apply,
 	}
@@ -100,7 +103,7 @@ func TestCheckBinary_InstallsWhenDifferent(t *testing.T) {
 	a, fu := newTestAgent(t, srv.URL)
 	a.writeInstalledVersion("v1")
 
-	if err := a.checkBinary(); err != nil {
+	if err := a.checkBinary(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.runCalled != 1 {
@@ -124,7 +127,7 @@ func TestCheckBinary_SkipsWhenSame(t *testing.T) {
 	a, fu := newTestAgent(t, srv.URL)
 	a.writeInstalledVersion("v2")
 
-	if err := a.checkBinary(); err != nil {
+	if err := a.checkBinary(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.runCalled != 0 {
@@ -141,7 +144,7 @@ func TestCheckBinary_SkipsKnownBadVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := a.checkBinary(); err != nil {
+	if err := a.checkBinary(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.runCalled != 0 {
@@ -157,7 +160,7 @@ func TestCheckBinary_FailureRecordsBadAndReports(t *testing.T) {
 	a.writeInstalledVersion("v1")
 	fu.runErr = io.ErrUnexpectedEOF // any install failure
 
-	if err := a.checkBinary(); err == nil {
+	if err := a.checkBinary(context.Background()); err == nil {
 		t.Fatal("expected error when update fails")
 	}
 	if !a.isBadVersion("v2") {
@@ -190,7 +193,7 @@ func TestCheckConfig_AppliesWhenDifferent(t *testing.T) {
 	a.deviceToken = "dev-token"
 	os.WriteFile(a.configPath, []byte("old config"), 0644)
 
-	if err := a.checkConfig(); err != nil {
+	if err := a.checkConfig(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.applyCalled != 1 {
@@ -212,7 +215,7 @@ func TestCheckConfig_SkipsWhenUnchanged(t *testing.T) {
 	a.deviceToken = "dev-token"
 	os.WriteFile(a.configPath, []byte(body), 0644)
 
-	if err := a.checkConfig(); err != nil {
+	if err := a.checkConfig(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.applyCalled != 0 {
@@ -226,7 +229,7 @@ func TestCheckConfig_SkipsWithoutToken(t *testing.T) {
 	a, fu := newTestAgent(t, srv.URL)
 	a.deviceToken = "" // not provisioned
 
-	if err := a.checkConfig(); err != nil {
+	if err := a.checkConfig(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.applyCalled != 0 {
@@ -234,12 +237,82 @@ func TestCheckConfig_SkipsWithoutToken(t *testing.T) {
 	}
 }
 
+// --- retry (fly scale-to-zero cold-start 502s) ---
+
+func TestDoWithRetry_RecoversFrom5xx(t *testing.T) {
+	var calls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/tfi/v1/latest", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 { // first two requests hit a "cold" machine
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		json.NewEncoder(w).Encode(latestResponse{Version: "v2", DownloadURL: "http://" + r.Host + "/download"})
+	})
+	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "BINARY-V2") })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	a, fu := newTestAgent(t, srv.URL)
+	a.writeInstalledVersion("v1")
+
+	if err := a.checkBinary(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("server called %d times, want 3 (2 retries then success)", calls)
+	}
+	if fu.runCalled != 1 {
+		t.Errorf("runUpdate called %d times, want 1", fu.runCalled)
+	}
+}
+
+func TestDoWithRetry_GivesUpAfterMaxAttempts(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+
+	a, _ := newTestAgent(t, srv.URL)
+	a.writeInstalledVersion("v1")
+
+	if err := a.checkBinary(context.Background()); err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if calls != a.retryAttempts {
+		t.Errorf("server called %d times, want %d", calls, a.retryAttempts)
+	}
+}
+
+func TestDoWithRetry_NoRetryOn4xx(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+
+	a, _ := newTestAgent(t, srv.URL)
+	a.deviceToken = "dev-token"
+	os.WriteFile(a.configPath, []byte("old"), 0644)
+
+	if err := a.checkConfig(context.Background()); err == nil {
+		t.Fatal("expected error on 401")
+	}
+	if calls != 1 {
+		t.Errorf("server called %d times, want 1 (4xx is not retried)", calls)
+	}
+}
+
 // --- settings ---
 
 func TestLoadSettings_Defaults(t *testing.T) {
 	s := loadSettings("/nonexistent/config.yaml", "/nonexistent/secrets.yaml")
-	if s.BaseURL != defaultBaseURL {
-		t.Errorf("BaseURL = %q, want default", s.BaseURL)
+	if s.BaseURL != "" {
+		t.Errorf("BaseURL = %q, want empty", s.BaseURL)
 	}
 	if s.Interval != defaultInterval {
 		t.Errorf("Interval = %s, want %s", s.Interval, defaultInterval)
@@ -253,8 +326,9 @@ func TestLoadSettings_Overrides(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 	sec := filepath.Join(dir, "secrets.yaml")
-	os.WriteFile(cfg, []byte("update_interval_seconds: 120\nupdate_base_url: https://example.test\n"), 0644)
-	os.WriteFile(sec, []byte("device_token: tok-123\n"), 0644)
+	// Interval comes from config.yaml; base_url + device_token from secrets.yaml.
+	os.WriteFile(cfg, []byte("update_interval_seconds: 120\n"), 0644)
+	os.WriteFile(sec, []byte("base_url: https://example.test\ndevice_token: tok-123\n"), 0644)
 
 	s := loadSettings(cfg, sec)
 	if s.BaseURL != "https://example.test" {

@@ -31,13 +31,6 @@ import (
 	"tfi-display/updater"
 )
 
-// defaultBaseURL is the update server origin. It is intentionally empty in
-// source (this repo is public) and injected at build time via
-// -ldflags "-X tfi-display/agent.defaultBaseURL=<url>" (see the Makefile's
-// AGENT_BASE_URL). It can also be overridden at runtime by update_base_url in
-// config.yaml. If neither is set, the agent logs and skips network work.
-var defaultBaseURL = ""
-
 const (
 	// defaultInterval is the poll cadence used until config.yaml sets one.
 	defaultInterval = time.Hour
@@ -48,6 +41,11 @@ const (
 	defaultBadVersionsFile = "/var/lib/tfi-agent/bad-versions"
 	binaryName             = "tfi-display"
 	httpTimeout            = 30 * time.Second
+	// defaultRetryAttempts/Delay ride out the 502s a scale-to-zero host (e.g.
+	// fly.io, Cloud Run) returns while it cold-starts: the first request triggers
+	// the start, and a retry a few seconds later hits the now-running app.
+	defaultRetryAttempts = 4
+	defaultRetryDelay    = 5 * time.Second
 )
 
 // Agent holds the resolved runtime state for one polling loop.
@@ -67,6 +65,8 @@ type Agent struct {
 	serviceName     string
 	waitTimeout     time.Duration
 	http            *http.Client
+	retryAttempts   int
+	retryDelay      time.Duration
 
 	// Hooks over the updater package, swapped out in tests so unit tests never
 	// touch systemctl or the real filesystem layout.
@@ -90,6 +90,8 @@ func New(configPath, secretsPath string) (*Agent, error) {
 		serviceName:     uc.ServiceName,
 		waitTimeout:     uc.WaitTimeout,
 		http:            &http.Client{Timeout: httpTimeout},
+		retryAttempts:   defaultRetryAttempts,
+		retryDelay:      defaultRetryDelay,
 		runUpdate:       updater.Run,
 		applyConfig:     updater.ApplyConfig,
 	}, nil
@@ -101,7 +103,7 @@ func New(configPath, secretsPath string) (*Agent, error) {
 func (a *Agent) Run(ctx context.Context) error {
 	for {
 		a.reloadSettings()
-		a.cycle()
+		a.cycle(ctx)
 
 		select {
 		case <-ctx.Done():
@@ -114,15 +116,15 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // cycle runs the binary check then the config check. The two are independent:
 // a config edit must not wait on a binary release, and vice versa.
-func (a *Agent) cycle() {
+func (a *Agent) cycle(ctx context.Context) {
 	if a.baseURL == "" {
-		log.Printf("tfi-agent: no API base URL configured (build with AGENT_BASE_URL or set update_base_url) — skipping")
+		log.Printf("tfi-agent: no base_url configured in secrets.yaml — skipping")
 		return
 	}
-	if err := a.checkBinary(); err != nil {
+	if err := a.checkBinary(ctx); err != nil {
 		log.Printf("tfi-agent: binary check: %v", err)
 	}
-	if err := a.checkConfig(); err != nil {
+	if err := a.checkConfig(ctx); err != nil {
 		log.Printf("tfi-agent: config check: %v", err)
 	}
 }
@@ -130,11 +132,11 @@ func (a *Agent) cycle() {
 // --- settings ---
 
 type fileSettings struct {
-	UpdateIntervalSec int    `yaml:"update_interval_seconds"`
-	UpdateBaseURL     string `yaml:"update_base_url"`
+	UpdateIntervalSec int `yaml:"update_interval_seconds"`
 }
 
 type secretSettings struct {
+	BaseURL     string `yaml:"base_url"`
 	DeviceToken string `yaml:"device_token"`
 }
 
@@ -153,33 +155,75 @@ func (a *Agent) reloadSettings() {
 
 // loadSettings reads only the fields the agent needs, leniently: missing or
 // unparseable files fall back to defaults rather than stopping the agent.
+//
+// base_url and device_token come from secrets.yaml — the one file the agent
+// never overwrites, so the API origin survives config syncs. The poll interval
+// lives in config.yaml so it can be managed centrally (and re-read each cycle).
 func loadSettings(configPath, secretsPath string) settings {
-	s := settings{BaseURL: defaultBaseURL, Interval: defaultInterval}
+	s := settings{Interval: defaultInterval}
 
 	if data, err := os.ReadFile(configPath); err == nil {
 		var fs fileSettings
 		if err := yaml.Unmarshal(data, &fs); err == nil {
-			if fs.UpdateBaseURL != "" {
-				s.BaseURL = fs.UpdateBaseURL
-			}
 			if fs.UpdateIntervalSec > 0 {
 				s.Interval = time.Duration(fs.UpdateIntervalSec) * time.Second
 			}
 		} else {
-			log.Printf("tfi-agent: parsing %s for settings: %v (using defaults)", configPath, err)
+			log.Printf("tfi-agent: parsing %s for interval: %v (using default)", configPath, err)
 		}
 	}
 
 	if data, err := os.ReadFile(secretsPath); err == nil {
 		var ss secretSettings
 		if err := yaml.Unmarshal(data, &ss); err == nil {
+			s.BaseURL = ss.BaseURL
 			s.DeviceToken = ss.DeviceToken
 		} else {
-			log.Printf("tfi-agent: parsing %s for device_token: %v", secretsPath, err)
+			log.Printf("tfi-agent: parsing %s for base_url/device_token: %v", secretsPath, err)
 		}
 	}
 
 	return s
+}
+
+// --- http with retry ---
+
+// doWithRetry sends the request built by newReq, retrying on network errors and
+// 5xx responses. A scale-to-zero update server stops when idle, so it 502s the
+// first (waking) request; a retry a few seconds later succeeds. newReq
+// is a factory because each attempt needs a fresh request (and body reader).
+//
+// A returned response is the caller's to close. 4xx responses are returned
+// without retry — they are not transient.
+func (a *Agent) doWithRetry(ctx context.Context, newReq func() (*http.Request, error)) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= a.retryAttempts; attempt++ {
+		req, err := newReq()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := a.http.Do(req.WithContext(ctx))
+		switch {
+		case err != nil:
+			lastErr = err
+		case resp.StatusCode >= 500:
+			lastErr = fmt.Errorf("server returned %s", resp.Status)
+			resp.Body.Close()
+		default:
+			return resp, nil
+		}
+		if attempt < a.retryAttempts {
+			log.Printf("tfi-agent: %v (attempt %d/%d) — retrying in %s", lastErr, attempt, a.retryAttempts, a.retryDelay)
+			// Cancellable sleep: a SIGTERM mid-retry aborts immediately rather
+			// than blocking shutdown for the full delay.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(a.retryDelay):
+			}
+		}
+	}
+	return nil, lastErr
 }
 
 // --- binary sync ---
@@ -189,8 +233,10 @@ type latestResponse struct {
 	DownloadURL string `json:"download_url"`
 }
 
-func (a *Agent) checkBinary() error {
-	resp, err := a.http.Get(a.baseURL + "/api/tfi/v1/latest")
+func (a *Agent) checkBinary(ctx context.Context) error {
+	resp, err := a.doWithRetry(ctx, func() (*http.Request, error) {
+		return http.NewRequest(http.MethodGet, a.baseURL+"/api/tfi/v1/latest", nil)
+	})
 	if err != nil {
 		return fmt.Errorf("fetching latest: %w", err)
 	}
@@ -232,7 +278,7 @@ func (a *Agent) checkBinary() error {
 		if mErr := a.markBadVersion(latest.Version); mErr != nil {
 			log.Printf("tfi-agent: recording bad version: %v", mErr)
 		}
-		if rErr := a.reportFailure(latest.Version, err.Error()); rErr != nil {
+		if rErr := a.reportFailure(ctx, latest.Version, err.Error()); rErr != nil {
 			log.Printf("tfi-agent: reporting failure: %v", rErr)
 		}
 		return fmt.Errorf("update failed: %w", err)
@@ -247,18 +293,20 @@ func (a *Agent) checkBinary() error {
 
 // --- config sync ---
 
-func (a *Agent) checkConfig() error {
+func (a *Agent) checkConfig(ctx context.Context) error {
 	if a.deviceToken == "" {
 		log.Printf("tfi-agent: no device_token configured — skipping config sync")
 		return nil
 	}
 
-	req, err := http.NewRequest(http.MethodGet, a.baseURL+"/api/tfi/v1/config_files/fetch", nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+a.deviceToken)
-	resp, err := a.http.Do(req)
+	resp, err := a.doWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodGet, a.baseURL+"/api/tfi/v1/config_files/fetch", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+a.deviceToken)
+		return req, nil
+	})
 	if err != nil {
 		return fmt.Errorf("fetching config: %w", err)
 	}
@@ -290,7 +338,7 @@ func (a *Agent) checkConfig() error {
 
 // --- failure reporting ---
 
-func (a *Agent) reportFailure(version, errMsg string) error {
+func (a *Agent) reportFailure(ctx context.Context, version, errMsg string) error {
 	if a.deviceToken == "" {
 		return fmt.Errorf("no device_token — cannot report failure")
 	}
@@ -301,13 +349,15 @@ func (a *Agent) reportFailure(version, errMsg string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, a.baseURL+"/api/tfi/v1/releases/report", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+a.deviceToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.http.Do(req)
+	resp, err := a.doWithRetry(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, a.baseURL+"/api/tfi/v1/releases/report", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+a.deviceToken)
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	})
 	if err != nil {
 		return err
 	}

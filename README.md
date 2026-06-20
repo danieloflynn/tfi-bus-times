@@ -118,7 +118,7 @@ ssh <pi-host> "sudo systemctl restart tfi-display"
 
 `tfi-display` — the binary built and deployed above — is fully standalone. It only talks to the TFI GTFS API; there is no auto-update logic in it and no dependency on any particular server.
 
-`tfi-agent` is a **separate, optional** binary (`make build-agent-pi`, `make deploy-agent`) for anyone who wants to push binary/config updates to one or more devices from their own server, instead of SSHing in for every change. It is not built or installed unless you explicitly run those targets, and even then it does nothing until `update_base_url` (or the build-time `AGENT_BASE_URL`) is set.
+`tfi-agent` is a **separate, optional** binary (`make build-agent-pi`, `make deploy-agent`) for anyone who wants to push binary/config updates to one or more devices from their own server, instead of SSHing in for every change. It is not built or installed unless you explicitly run those targets, and even then it does nothing until `base_url` (your update server's origin) is set in `secrets.yaml`.
 
 If you want to self-host an update server, `tfi-agent` expects three endpoints:
 
@@ -128,7 +128,7 @@ If you want to self-host an update server, `tfi-agent` expects three endpoints:
 | `GET /api/tfi/v1/config_files/fetch` | `Authorization: Bearer <device_token>` | Returns the raw `config.yaml` contents for this device. The agent applies it whenever the bytes differ from what's on disk. |
 | `POST /api/tfi/v1/releases/report` | `Authorization: Bearer <device_token>` | Body `{"release_failure": {"version": "...", "error": "..."}}`, sent when an install fails and is rolled back, so a central server can mark that version bad. |
 
-`device_token` is a per-device secret set in `secrets.yaml` (see `secrets.yaml.example`); binary updates need no auth since `/latest` is public. Without `device_token`, config sync and failure reporting are skipped but binary updates still work.
+Both `base_url` and `device_token` are per-device secrets set in `secrets.yaml` (see `secrets.yaml.example`) — kept there, not in `config.yaml`, because the agent overwrites `config.yaml` on each sync but never touches `secrets.yaml`. Binary updates need no auth since `/latest` is public; without `device_token`, config sync and failure reporting are skipped but binary updates still work.
 
 ## Development / Mock Mode
 

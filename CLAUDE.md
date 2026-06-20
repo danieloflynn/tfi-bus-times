@@ -69,7 +69,7 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 **Agent update model** — the agent compares `/latest`'s version to a marker file (`/usr/local/bin/tfi-display.version`, written after a successful install) and installs whenever it *differs* — not just when newer — so a central rollback (re-pointing the release) propagates to devices. A version that fails to install is appended to `/var/lib/tfi-agent/bad-versions` (persisted across restarts) so it isn't retried every cycle, and is reported to the API. The poll interval comes from `update_interval_seconds` in `config.yaml` (default hourly, used whenever the file is missing/malformed), re-read each cycle, so a fetched config can change the cadence without an SSH visit. Binary updates need no secrets (`/latest` is public); only config sync and failure reporting use `device_token`.
 
-The API origin (`defaultBaseURL`) is deliberately empty in source — **this repo is public** — and injected at build time via `-ldflags -X tfi-display/agent.defaultBaseURL=...` (Makefile `AGENT_BASE_URL`), or set at runtime via `update_base_url` in `config.yaml`. If neither is set, the agent logs and skips. Never commit the real URL.
+The API origin (`base_url`) and `device_token` live in `secrets.yaml`, not `config.yaml` — the agent overwrites `config.yaml` on each sync but never touches `secrets.yaml`, so the bootstrap "where is home" survives. `secrets.yaml` is gitignored, keeping the real URL out of this public repo. If `base_url` is unset the agent logs and skips.
 
 **Non-obvious code must have comments** — whenever a piece of code does something that isn't immediately clear from reading it (e.g. the 12-hour overnight rule, BOM stripping in CSV headers, backoff logic), add an inline comment explaining _why_, not just _what_. Also update this file to document any new patterns introduced.
 
@@ -97,9 +97,9 @@ Update `PI_HOST` in `Makefile` before deploying.
 ```sh
 # On Pi (one-time setup):
 sudo cp secrets.yaml.example /etc/tfi-display/secrets.yaml
-# Edit /etc/tfi-display/secrets.yaml — set api_key and device_token
-# (device_token = the per-device key issued by your update server, if you
-# run one — device_token is only needed for the optional tfi-agent)
+# Edit /etc/tfi-display/secrets.yaml — set api_key and (for the optional
+# tfi-agent) base_url + device_token (base_url = your update server's origin;
+# device_token = the per-device key it issued). The agent is skipped if unset.
 sudo chown root:root /etc/tfi-display/secrets.yaml && sudo chmod 600 /etc/tfi-display/secrets.yaml
 
 sudo cp config.yaml.example /etc/tfi-display/config.yaml
