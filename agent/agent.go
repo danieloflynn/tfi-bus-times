@@ -103,7 +103,7 @@ func New(configPath, secretsPath string) (*Agent, error) {
 func (a *Agent) Run(ctx context.Context) error {
 	for {
 		a.reloadSettings()
-		a.cycle()
+		a.cycle(ctx)
 
 		select {
 		case <-ctx.Done():
@@ -116,15 +116,15 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // cycle runs the binary check then the config check. The two are independent:
 // a config edit must not wait on a binary release, and vice versa.
-func (a *Agent) cycle() {
+func (a *Agent) cycle(ctx context.Context) {
 	if a.baseURL == "" {
 		log.Printf("tfi-agent: no base_url configured in secrets.yaml — skipping")
 		return
 	}
-	if err := a.checkBinary(); err != nil {
+	if err := a.checkBinary(ctx); err != nil {
 		log.Printf("tfi-agent: binary check: %v", err)
 	}
-	if err := a.checkConfig(); err != nil {
+	if err := a.checkConfig(ctx); err != nil {
 		log.Printf("tfi-agent: config check: %v", err)
 	}
 }
@@ -195,14 +195,14 @@ func loadSettings(configPath, secretsPath string) settings {
 //
 // A returned response is the caller's to close. 4xx responses are returned
 // without retry — they are not transient.
-func (a *Agent) doWithRetry(newReq func() (*http.Request, error)) (*http.Response, error) {
+func (a *Agent) doWithRetry(ctx context.Context, newReq func() (*http.Request, error)) (*http.Response, error) {
 	var lastErr error
 	for attempt := 1; attempt <= a.retryAttempts; attempt++ {
 		req, err := newReq()
 		if err != nil {
 			return nil, err
 		}
-		resp, err := a.http.Do(req)
+		resp, err := a.http.Do(req.WithContext(ctx))
 		switch {
 		case err != nil:
 			lastErr = err
@@ -214,7 +214,13 @@ func (a *Agent) doWithRetry(newReq func() (*http.Request, error)) (*http.Respons
 		}
 		if attempt < a.retryAttempts {
 			log.Printf("tfi-agent: %v (attempt %d/%d) — retrying in %s", lastErr, attempt, a.retryAttempts, a.retryDelay)
-			time.Sleep(a.retryDelay)
+			// Cancellable sleep: a SIGTERM mid-retry aborts immediately rather
+			// than blocking shutdown for the full delay.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(a.retryDelay):
+			}
 		}
 	}
 	return nil, lastErr
@@ -227,8 +233,8 @@ type latestResponse struct {
 	DownloadURL string `json:"download_url"`
 }
 
-func (a *Agent) checkBinary() error {
-	resp, err := a.doWithRetry(func() (*http.Request, error) {
+func (a *Agent) checkBinary(ctx context.Context) error {
+	resp, err := a.doWithRetry(ctx, func() (*http.Request, error) {
 		return http.NewRequest(http.MethodGet, a.baseURL+"/api/tfi/v1/latest", nil)
 	})
 	if err != nil {
@@ -272,7 +278,7 @@ func (a *Agent) checkBinary() error {
 		if mErr := a.markBadVersion(latest.Version); mErr != nil {
 			log.Printf("tfi-agent: recording bad version: %v", mErr)
 		}
-		if rErr := a.reportFailure(latest.Version, err.Error()); rErr != nil {
+		if rErr := a.reportFailure(ctx, latest.Version, err.Error()); rErr != nil {
 			log.Printf("tfi-agent: reporting failure: %v", rErr)
 		}
 		return fmt.Errorf("update failed: %w", err)
@@ -287,13 +293,13 @@ func (a *Agent) checkBinary() error {
 
 // --- config sync ---
 
-func (a *Agent) checkConfig() error {
+func (a *Agent) checkConfig(ctx context.Context) error {
 	if a.deviceToken == "" {
 		log.Printf("tfi-agent: no device_token configured — skipping config sync")
 		return nil
 	}
 
-	resp, err := a.doWithRetry(func() (*http.Request, error) {
+	resp, err := a.doWithRetry(ctx, func() (*http.Request, error) {
 		req, err := http.NewRequest(http.MethodGet, a.baseURL+"/api/tfi/v1/config_files/fetch", nil)
 		if err != nil {
 			return nil, err
@@ -332,7 +338,7 @@ func (a *Agent) checkConfig() error {
 
 // --- failure reporting ---
 
-func (a *Agent) reportFailure(version, errMsg string) error {
+func (a *Agent) reportFailure(ctx context.Context, version, errMsg string) error {
 	if a.deviceToken == "" {
 		return fmt.Errorf("no device_token — cannot report failure")
 	}
@@ -343,7 +349,7 @@ func (a *Agent) reportFailure(version, errMsg string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := a.doWithRetry(func() (*http.Request, error) {
+	resp, err := a.doWithRetry(ctx, func() (*http.Request, error) {
 		req, err := http.NewRequest(http.MethodPost, a.baseURL+"/api/tfi/v1/releases/report", bytes.NewReader(body))
 		if err != nil {
 			return nil, err

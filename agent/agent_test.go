@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -102,7 +103,7 @@ func TestCheckBinary_InstallsWhenDifferent(t *testing.T) {
 	a, fu := newTestAgent(t, srv.URL)
 	a.writeInstalledVersion("v1")
 
-	if err := a.checkBinary(); err != nil {
+	if err := a.checkBinary(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.runCalled != 1 {
@@ -126,7 +127,7 @@ func TestCheckBinary_SkipsWhenSame(t *testing.T) {
 	a, fu := newTestAgent(t, srv.URL)
 	a.writeInstalledVersion("v2")
 
-	if err := a.checkBinary(); err != nil {
+	if err := a.checkBinary(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.runCalled != 0 {
@@ -143,7 +144,7 @@ func TestCheckBinary_SkipsKnownBadVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := a.checkBinary(); err != nil {
+	if err := a.checkBinary(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.runCalled != 0 {
@@ -159,7 +160,7 @@ func TestCheckBinary_FailureRecordsBadAndReports(t *testing.T) {
 	a.writeInstalledVersion("v1")
 	fu.runErr = io.ErrUnexpectedEOF // any install failure
 
-	if err := a.checkBinary(); err == nil {
+	if err := a.checkBinary(context.Background()); err == nil {
 		t.Fatal("expected error when update fails")
 	}
 	if !a.isBadVersion("v2") {
@@ -192,7 +193,7 @@ func TestCheckConfig_AppliesWhenDifferent(t *testing.T) {
 	a.deviceToken = "dev-token"
 	os.WriteFile(a.configPath, []byte("old config"), 0644)
 
-	if err := a.checkConfig(); err != nil {
+	if err := a.checkConfig(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.applyCalled != 1 {
@@ -214,7 +215,7 @@ func TestCheckConfig_SkipsWhenUnchanged(t *testing.T) {
 	a.deviceToken = "dev-token"
 	os.WriteFile(a.configPath, []byte(body), 0644)
 
-	if err := a.checkConfig(); err != nil {
+	if err := a.checkConfig(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.applyCalled != 0 {
@@ -228,7 +229,7 @@ func TestCheckConfig_SkipsWithoutToken(t *testing.T) {
 	a, fu := newTestAgent(t, srv.URL)
 	a.deviceToken = "" // not provisioned
 
-	if err := a.checkConfig(); err != nil {
+	if err := a.checkConfig(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if fu.applyCalled != 0 {
@@ -256,7 +257,7 @@ func TestDoWithRetry_RecoversFrom5xx(t *testing.T) {
 	a, fu := newTestAgent(t, srv.URL)
 	a.writeInstalledVersion("v1")
 
-	if err := a.checkBinary(); err != nil {
+	if err := a.checkBinary(context.Background()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if calls != 3 {
@@ -278,7 +279,7 @@ func TestDoWithRetry_GivesUpAfterMaxAttempts(t *testing.T) {
 	a, _ := newTestAgent(t, srv.URL)
 	a.writeInstalledVersion("v1")
 
-	if err := a.checkBinary(); err == nil {
+	if err := a.checkBinary(context.Background()); err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
 	if calls != a.retryAttempts {
@@ -298,7 +299,7 @@ func TestDoWithRetry_NoRetryOn4xx(t *testing.T) {
 	a.deviceToken = "dev-token"
 	os.WriteFile(a.configPath, []byte("old"), 0644)
 
-	if err := a.checkConfig(); err == nil {
+	if err := a.checkConfig(context.Background()); err == nil {
 		t.Fatal("expected error on 401")
 	}
 	if calls != 1 {
