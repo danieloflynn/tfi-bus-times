@@ -41,6 +41,11 @@ const (
 	defaultBadVersionsFile = "/var/lib/tfi-agent/bad-versions"
 	binaryName             = "tfi-display"
 	httpTimeout            = 30 * time.Second
+	// defaultRetryAttempts/Delay ride out the 502s fly returns while a
+	// scale-to-zero machine cold-starts: the first request triggers the start,
+	// and a retry a few seconds later hits the now-running app.
+	defaultRetryAttempts = 4
+	defaultRetryDelay    = 5 * time.Second
 )
 
 // Agent holds the resolved runtime state for one polling loop.
@@ -60,6 +65,8 @@ type Agent struct {
 	serviceName     string
 	waitTimeout     time.Duration
 	http            *http.Client
+	retryAttempts   int
+	retryDelay      time.Duration
 
 	// Hooks over the updater package, swapped out in tests so unit tests never
 	// touch systemctl or the real filesystem layout.
@@ -83,6 +90,8 @@ func New(configPath, secretsPath string) (*Agent, error) {
 		serviceName:     uc.ServiceName,
 		waitTimeout:     uc.WaitTimeout,
 		http:            &http.Client{Timeout: httpTimeout},
+		retryAttempts:   defaultRetryAttempts,
+		retryDelay:      defaultRetryDelay,
 		runUpdate:       updater.Run,
 		applyConfig:     updater.ApplyConfig,
 	}, nil
@@ -177,6 +186,40 @@ func loadSettings(configPath, secretsPath string) settings {
 	return s
 }
 
+// --- http with retry ---
+
+// doWithRetry sends the request built by newReq, retrying on network errors and
+// 5xx responses. The dandev app runs scale-to-zero on fly, so a stopped machine
+// 502s the first (waking) request; a retry a few seconds later succeeds. newReq
+// is a factory because each attempt needs a fresh request (and body reader).
+//
+// A returned response is the caller's to close. 4xx responses are returned
+// without retry — they are not transient.
+func (a *Agent) doWithRetry(newReq func() (*http.Request, error)) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= a.retryAttempts; attempt++ {
+		req, err := newReq()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := a.http.Do(req)
+		switch {
+		case err != nil:
+			lastErr = err
+		case resp.StatusCode >= 500:
+			lastErr = fmt.Errorf("server returned %s", resp.Status)
+			resp.Body.Close()
+		default:
+			return resp, nil
+		}
+		if attempt < a.retryAttempts {
+			log.Printf("tfi-agent: %v (attempt %d/%d) — retrying in %s", lastErr, attempt, a.retryAttempts, a.retryDelay)
+			time.Sleep(a.retryDelay)
+		}
+	}
+	return nil, lastErr
+}
+
 // --- binary sync ---
 
 type latestResponse struct {
@@ -185,7 +228,9 @@ type latestResponse struct {
 }
 
 func (a *Agent) checkBinary() error {
-	resp, err := a.http.Get(a.baseURL + "/api/tfi/v1/latest")
+	resp, err := a.doWithRetry(func() (*http.Request, error) {
+		return http.NewRequest(http.MethodGet, a.baseURL+"/api/tfi/v1/latest", nil)
+	})
 	if err != nil {
 		return fmt.Errorf("fetching latest: %w", err)
 	}
@@ -248,12 +293,14 @@ func (a *Agent) checkConfig() error {
 		return nil
 	}
 
-	req, err := http.NewRequest(http.MethodGet, a.baseURL+"/api/tfi/v1/config_files/fetch", nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+a.deviceToken)
-	resp, err := a.http.Do(req)
+	resp, err := a.doWithRetry(func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodGet, a.baseURL+"/api/tfi/v1/config_files/fetch", nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+a.deviceToken)
+		return req, nil
+	})
 	if err != nil {
 		return fmt.Errorf("fetching config: %w", err)
 	}
@@ -296,13 +343,15 @@ func (a *Agent) reportFailure(version, errMsg string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, a.baseURL+"/api/tfi/v1/releases/report", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+a.deviceToken)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.http.Do(req)
+	resp, err := a.doWithRetry(func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, a.baseURL+"/api/tfi/v1/releases/report", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+a.deviceToken)
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	})
 	if err != nil {
 		return err
 	}

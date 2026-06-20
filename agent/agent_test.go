@@ -67,6 +67,8 @@ func newTestAgent(t *testing.T, baseURL string) (*Agent, *fakeUpdater) {
 		serviceName:     "tfi-display",
 		waitTimeout:     time.Second,
 		http:            &http.Client{Timeout: 5 * time.Second},
+		retryAttempts:   4,
+		retryDelay:      time.Millisecond,
 		runUpdate:       fu.run,
 		applyConfig:     fu.apply,
 	}
@@ -231,6 +233,76 @@ func TestCheckConfig_SkipsWithoutToken(t *testing.T) {
 	}
 	if fu.applyCalled != 0 {
 		t.Errorf("applyConfig should not be called without a device token")
+	}
+}
+
+// --- retry (fly scale-to-zero cold-start 502s) ---
+
+func TestDoWithRetry_RecoversFrom5xx(t *testing.T) {
+	var calls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/tfi/v1/latest", func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 { // first two requests hit a "cold" machine
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		json.NewEncoder(w).Encode(latestResponse{Version: "v2", DownloadURL: "http://" + r.Host + "/download"})
+	})
+	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "BINARY-V2") })
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	a, fu := newTestAgent(t, srv.URL)
+	a.writeInstalledVersion("v1")
+
+	if err := a.checkBinary(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 3 {
+		t.Errorf("server called %d times, want 3 (2 retries then success)", calls)
+	}
+	if fu.runCalled != 1 {
+		t.Errorf("runUpdate called %d times, want 1", fu.runCalled)
+	}
+}
+
+func TestDoWithRetry_GivesUpAfterMaxAttempts(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+
+	a, _ := newTestAgent(t, srv.URL)
+	a.writeInstalledVersion("v1")
+
+	if err := a.checkBinary(); err == nil {
+		t.Fatal("expected error after exhausting retries")
+	}
+	if calls != a.retryAttempts {
+		t.Errorf("server called %d times, want %d", calls, a.retryAttempts)
+	}
+}
+
+func TestDoWithRetry_NoRetryOn4xx(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+
+	a, _ := newTestAgent(t, srv.URL)
+	a.deviceToken = "dev-token"
+	os.WriteFile(a.configPath, []byte("old"), 0644)
+
+	if err := a.checkConfig(); err == nil {
+		t.Fatal("expected error on 401")
+	}
+	if calls != 1 {
+		t.Errorf("server called %d times, want 1 (4xx is not retried)", calls)
 	}
 }
 
