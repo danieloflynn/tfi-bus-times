@@ -4,18 +4,29 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 ![Preview](assets/preview.png)
 
-## Hardware
+## What you'll need
 
-- Raspberry Pi Zero 2W
-- 7" LCD HAT (1024×600 DPI panel)
+- A Raspberry Pi Zero 2W
+- A 7" LCD HAT (1024×600 DPI panel)
+- A microSD card + a way to flash it (e.g. Raspberry Pi Imager)
+- A computer with [Go](https://go.dev/dl/) installed, on the same network as the Pi, with SSH access to it
+- A free TFI API key (registered in step 4)
 
-## Raspberry Pi OS
+Setup is done once from your computer via `make deploy` over SSH — no manual file copying required.
 
-Install **Raspberry Pi OS Lite (64-bit, Bookworm)**. The binary is ARM64 and writes directly to `/dev/fb0` — no desktop required.
+## 1. Flash Raspberry Pi OS
 
-## Pi Firmware Config
+Flash **Raspberry Pi OS Lite (64-bit, Bookworm)** to the microSD card. The display binary is ARM64 and writes directly to `/dev/fb0`, so the Lite (no desktop) image is enough. When flashing, enable SSH and set a hostname/username/password (or an SSH key) so you can reach the Pi headlessly.
 
-Add these lines to `/boot/firmware/config.txt` under the `[all]` section:
+Boot the Pi and confirm you can SSH into it:
+
+```sh
+ssh pi@<pi-hostname-or-ip>
+```
+
+## 2. Configure the LCD panel
+
+Add these lines to `/boot/firmware/config.txt` on the Pi, under the `[all]` section:
 
 ```
 dtoverlay=vc4-kms-dpi-generic
@@ -25,31 +36,37 @@ dtparam=clock-frequency=49000000
 dtparam=rgb666-padhi
 ```
 
-Also add the following to the end of the single line in `/boot/firmware/cmdline.txt` (space-separated, no newline):
+Append the following to the end of the single line in `/boot/firmware/cmdline.txt` (space-separated, no newline):
 
 ```
 vt.global_cursor_default=0 consoleblank=0
 ```
 
-This hides the kernel console cursor and prevents the framebuffer from blanking after inactivity.
+This hides the kernel console cursor and stops the framebuffer from blanking after inactivity.
 
-Reboot — the LCD will appear as `/dev/fb0`.
+Reboot the Pi — the LCD should appear as `/dev/fb0`:
 
-### VCOM Adjustment
+```sh
+sudo reboot
+```
 
-The LCD HAT has a small VCOM potentiometer screw on the board. Turn it slowly with a small screwdriver while the display is showing content to adjust contrast/brightness. There is a sweet spot where the white background is clean and text is crisp.
+### VCOM adjustment
 
-## TFI API Key
+The LCD HAT has a small VCOM potentiometer screw on the board. With the display showing content, turn it slowly with a small screwdriver to adjust contrast/brightness. There's a sweet spot where the white background is clean and text is crisp.
 
-Register for a free key at https://developer.nationaltransport.ie/
+## 3. Get a TFI API key
 
-## Configuration
+Register for a free key at https://developer.nationaltransport.ie/ — you'll need it in the next step.
+
+## 4. Configure the app
+
+On your development machine, in this repo:
 
 ```sh
 cp config.yaml.example config.yaml
 ```
 
-Minimal `config.yaml`:
+Edit `config.yaml` — at minimum, set your API key and stops:
 
 ```yaml
 api_key: "your-key-here"
@@ -63,34 +80,38 @@ stops:
 display_model: "lcd"
 ```
 
-Optional fields: `routes` (filter by route short name), `poll_interval_seconds` (default 60), `max_minutes` (default 90), `framebuffer_device` (default `/dev/fb0`).
+Find `stop_number` values by looking up your stop on [transportforireland.ie](https://www.transportforireland.ie/) or the TFI Live app — it's the number printed on the physical stop pole.
 
-## Build & Deploy
+Optional fields: `routes` (filter by route short name), `poll_interval_seconds` (default 60), `page_interval_seconds` / `max_pages` (paging through arrivals), `max_minutes` (default 90), `framebuffer_device` (default `/dev/fb0`), `start_time` / `stop_time` (wake/sleep schedule). See `config.yaml.example` for the full list with comments.
 
-**Prerequisites:** Go installed on your development machine, SSH access to the Pi.
+> Keeping `api_key` in `config.yaml` is fine for a single device. If you'd rather keep secrets out of the config file entirely (e.g. before committing it anywhere), put `api_key` in a separate `secrets.yaml` instead — see `secrets.yaml.example`. If `secrets.yaml` exists and sets `api_key`, it takes priority over the one in `config.yaml`; if it's absent, `config.yaml`'s `api_key` is used (the systemd service always points at `/etc/tfi-display/secrets.yaml`, but a missing file there is not an error).
 
-1. Update `PI_HOST` in the `Makefile`.
-2. Run:
+## 5. Build and deploy
+
+1. Update `PI_HOST` in the `Makefile` to match your Pi (e.g. `pi@raspberrypi.local`).
+2. From your development machine, run:
 
 ```sh
 make deploy
 ```
 
-This cross-compiles an ARM64 binary, copies it and the systemd service file to the Pi, then enables and starts the service.
+This cross-compiles an ARM64 binary, copies it and the systemd service file to the Pi over SSH, copies `config.yaml` if present locally, then enables and starts the `tfi-display` service. No manual steps on the Pi are needed.
 
-> `config.yaml` is also copied if present locally.
-
-## Service Management
+## 6. Verify it's running
 
 ```sh
-# View live logs
-journalctl -u tfi-display -f
+ssh <pi-host> "systemctl status tfi-display"
+ssh <pi-host> "journalctl -u tfi-display -f"   # live logs
+```
 
-# Restart after config change
-systemctl restart tfi-display
+The LCD should show your configured stops with live arrival times within a minute or so. If it doesn't, check the logs above for API key or config errors.
 
-# Check status
-systemctl status tfi-display
+## Making changes later
+
+After editing `config.yaml` or the code, just re-run `make deploy` — it rebuilds and restarts the service. To restart without redeploying:
+
+```sh
+ssh <pi-host> "sudo systemctl restart tfi-display"
 ```
 
 ## Auto-Updates (optional)
