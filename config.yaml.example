@@ -7,12 +7,18 @@
 # -----------------------------------------------------------------------
 # Bus stops to monitor.  stop_number is the number printed on the stop.
 # label is shown in the display header.
+#
+# walking_minutes (optional): how long it takes to walk to the stop.
+# Arrivals sooner than this are hidden — you couldn't get there in time
+# anyway.  Omit or set 0 to show everything (the default).
 # -----------------------------------------------------------------------
 stops:
   - stop_number: "478"
     label: "Vinny's"
+    walking_minutes: 5
   - stop_number: "2808"
     label: "Sandymount"
+    walking_minutes: 12
   - stop_number: "999126"
     label: "Dart"
 

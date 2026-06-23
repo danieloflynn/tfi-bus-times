@@ -14,6 +14,10 @@ import (
 type StopConfig struct {
 	StopNumber string `yaml:"stop_number"`
 	Label      string `yaml:"label"`
+	// WalkingMinutes is how long it takes to walk to this stop. Arrivals
+	// sooner than this are hidden — you couldn't get there in time anyway.
+	// 0 (or omitted) disables the filter for this stop.
+	WalkingMinutes int `yaml:"walking_minutes"`
 }
 
 // Config is loaded from config.yaml at startup.
@@ -100,6 +104,10 @@ func loadFile(path string) (*Config, error) {
 	for i, s := range cfg.Stops {
 		if s.StopNumber == "" {
 			return nil, fmt.Errorf("stop[%d]: stop_number is required", i)
+		}
+		// A negative walking time is meaningless; treat it as "no filter".
+		if s.WalkingMinutes < 0 {
+			cfg.Stops[i].WalkingMinutes = 0
 		}
 	}
 

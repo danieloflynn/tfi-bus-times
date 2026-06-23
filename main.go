@@ -218,7 +218,7 @@ func renderAndDisplay(
 	sections := make([]display.StopSection, len(cfg.Stops))
 	totalArrivals := 0
 	for i, s := range cfg.Stops {
-		arr := gtfs.QueryArrivals(db, live, s.StopNumber, now, cfg.MaxMinutes, routeFilter)
+		arr := gtfs.QueryArrivals(db, live, s.StopNumber, now, cfg.MaxMinutes, s.WalkingMinutes, routeFilter)
 		totalArrivals += len(arr)
 		if len(arr) > 0 && pageSize > 0 {
 			numPages := (len(arr) + pageSize - 1) / pageSize
