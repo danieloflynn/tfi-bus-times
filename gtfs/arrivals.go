@@ -60,17 +60,25 @@ func IsServiceActive(db *StaticDB, serviceID string, dt time.Time) bool {
 
 // QueryArrivals returns upcoming arrivals for stopNumber within maxMinutes,
 // optionally filtered to routeFilter (empty = all routes), sorted by effective time.
+//
+// minMinutes is the walking time to the stop: arrivals sooner than this (by
+// effective time) are dropped, since you couldn't get there in time. 0 = no
+// such filtering.
 func QueryArrivals(
 	db *StaticDB,
 	live *LiveStore,
 	stopNumber string,
 	now time.Time,
 	maxMinutes int,
+	minMinutes int,
 	routeFilter map[string]bool,
 ) []Arrival {
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	nowSecs := now.Hour()*3600 + now.Minute()*60 + now.Second()
 	windowEnd := now.Add(time.Duration(maxMinutes) * time.Minute)
+	// Walking cutoff: arrivals before this are too soon to catch. Buses arriving
+	// exactly at the cutoff are still shown (strictly-under semantics).
+	walkCutoff := now.Add(time.Duration(minMinutes) * time.Minute)
 
 	// Determine which hour buckets to scan.
 	// We look back 1 hour (to catch delayed buses) and forward enough to fill window.
@@ -151,6 +159,11 @@ func QueryArrivals(
 				continue
 			}
 
+			// Skip if it arrives sooner than we can walk there.
+			if minMinutes > 0 && effectiveTime.Before(walkCutoff) {
+				continue
+			}
+
 			arrivals = append(arrivals, Arrival{
 				RouteShort:    trip.RouteShort,
 				Platform:      db.StopPlatforms[stopNumber],
@@ -168,6 +181,10 @@ func QueryArrivals(
 			continue
 		}
 		if add.ArrivalTime.Before(now) || add.ArrivalTime.After(windowEnd) {
+			continue
+		}
+		// Skip if it arrives sooner than we can walk there.
+		if minMinutes > 0 && add.ArrivalTime.Before(walkCutoff) {
 			continue
 		}
 		arrivals = append(arrivals, Arrival{

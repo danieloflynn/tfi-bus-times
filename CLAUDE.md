@@ -32,7 +32,7 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 **`gtfs/`** — All GTFS logic:
 - `static.go` — downloads the TFI GTFS ZIP, parses it into a `StaticDB` (stops, trips, services, calendar exceptions), and caches it as a gob file. Cache is invalidated by the upstream `Last-Modified` header or a schema version bump.
 - `realtime.go` — polls the GTFS-RT TripUpdates endpoint, parses protobuf into a `LiveStore`. Handles delays (absolute timestamps or delta seconds), cancellations, and added trips. Includes exponential backoff on rate-limit errors.
-- `arrivals.go` — `QueryArrivals` joins static and live data to produce a time-sorted `[]Arrival` for a stop. Applies calendar validity, cancellation checks, route filtering, and deduplication.
+- `arrivals.go` — `QueryArrivals` joins static and live data to produce a time-sorted `[]Arrival` for a stop. Applies calendar validity, cancellation checks, route filtering, a per-stop walking-time cutoff (`minMinutes`), and deduplication.
 
 **`display/`** — Image rendering:
 - `renderer.go` — small-display path (e-ink, < 800 px wide). All sections are merged into one sorted list. Uses `basicfont 7×13`.
@@ -56,6 +56,8 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 **Hour-bucket indexing** — `StaticDB.StopTimes` is indexed `stopNumber → hour → []StopTime`. `QueryArrivals` scans only the relevant hour buckets (current hour ±1 plus lookahead), keeping query time sub-millisecond even for large feeds.
 
 **12-hour rule for overnight trips** — GTFS allows arrival times > 24:00 (e.g. `25:30:00`). When reconstructing wall-clock time, if the scheduled seconds-since-midnight is more than 12 hours behind `now`, the arrival is treated as belonging to the next calendar day.
+
+**Walking-time cutoff** — each stop may set `walking_minutes`. `QueryArrivals` drops any arrival whose *effective* time (realtime if present, else scheduled) falls before `now + walking_minutes`, since you couldn't reach the stop in time. The cutoff is strictly-under: a bus arriving exactly at `now + walking_minutes` is still shown. `0` (or omitted, or negative — clamped to 0 at load) disables it.
 
 **Realtime overlay** — `LiveStore` is a concurrent-safe in-memory store updated by the poller goroutine. `QueryArrivals` reads from it under `RLock`. Delays are applied as an absolute Unix timestamp (preferred) or a delta-seconds offset.
 
@@ -113,7 +115,8 @@ Key fields:
 | Field                          | Default       | Notes                                               |
 | ------------------------------ | ------------- | --------------------------------------------------- |
 | `api_key`                      | —             | **In `secrets.yaml` only.** Register at nationaltransport.ie |
-| `stops`                        | —             | Required. List of `stop_number` + `label`           |
+| `stops`                        | —             | Required. List of `stop_number` + `label` (+ optional `walking_minutes`) |
+| `stops[].walking_minutes`      | 0 (off)       | Hide arrivals sooner than this many minutes (walk time) |
 | `routes`                       | (all)         | Optional whitelist of route short names             |
 | `poll_interval_seconds`        | 60            | How often to fetch live data                        |
 | `page_interval_seconds`        | 5             | How often to advance the arrival page               |

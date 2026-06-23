@@ -60,6 +60,36 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 }
 
+func TestLoad_WalkingMinutes(t *testing.T) {
+	const stops = `
+stops:
+  - stop_number: "1234"
+    label: Near
+    walking_minutes: 5
+  - stop_number: "5678"
+    label: Far
+    walking_minutes: -3
+  - stop_number: "9012"
+    label: Default
+`
+	p := writeTemp(t, "config.yaml", `api_key: "k"`+stops)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Stops[0].WalkingMinutes != 5 {
+		t.Errorf("stop 0 walking_minutes = %d, want 5", cfg.Stops[0].WalkingMinutes)
+	}
+	// Negative values are clamped to 0 (no filtering).
+	if cfg.Stops[1].WalkingMinutes != 0 {
+		t.Errorf("negative walking_minutes should clamp to 0, got %d", cfg.Stops[1].WalkingMinutes)
+	}
+	// Omitted defaults to 0.
+	if cfg.Stops[2].WalkingMinutes != 0 {
+		t.Errorf("omitted walking_minutes should be 0, got %d", cfg.Stops[2].WalkingMinutes)
+	}
+}
+
 // --- LoadWithSecrets ---
 
 func TestLoadWithSecrets_FromSecretsFile(t *testing.T) {

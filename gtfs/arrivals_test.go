@@ -165,7 +165,7 @@ func TestQueryArrivalsBasic(t *testing.T) {
 	// "now" = 2023-09-15 09:10:00 UTC (matching Python test)
 	now := time.Date(2023, 9, 15, 9, 10, 0, 0, time.UTC)
 
-	arrivals := QueryArrivals(db, ls, "1358", now, 60, nil)
+	arrivals := QueryArrivals(db, ls, "1358", now, 60, 0, nil)
 	if len(arrivals) == 0 {
 		t.Fatal("expected at least one arrival")
 	}
@@ -196,7 +196,7 @@ func TestQueryArrivalsWithDelay(t *testing.T) {
 	}
 
 	now := time.Date(2023, 9, 15, 9, 10, 0, 0, time.UTC)
-	arrivals := QueryArrivals(db, ls, "1358", now, 60, nil)
+	arrivals := QueryArrivals(db, ls, "1358", now, 60, 0, nil)
 
 	var a68 *Arrival
 	for i := range arrivals {
@@ -225,12 +225,61 @@ func TestQueryArrivalsCancelled(t *testing.T) {
 	ls.Cancellations["3582_9999"] = time.Now() // route 68 trip cancelled
 
 	now := time.Date(2023, 9, 15, 9, 10, 0, 0, time.UTC)
-	arrivals := QueryArrivals(db, ls, "1358", now, 60, nil)
+	arrivals := QueryArrivals(db, ls, "1358", now, 60, 0, nil)
 
 	for _, a := range arrivals {
 		if a.RouteShort == "68" {
 			t.Error("cancelled 68 trip should not appear in arrivals")
 		}
+	}
+}
+
+// TestQueryArrivalsWalkingFilter verifies arrivals sooner than the walking
+// time are dropped, and that the cutoff is strictly-under (a bus arriving
+// exactly at the cutoff is still shown).
+func TestQueryArrivalsWalkingFilter(t *testing.T) {
+	db := makeTestDB()
+	ls := NewLiveStore()
+
+	// Arrivals at stop 1358: 68 @ 09:15:50, 49 @ 09:24:16, 27 @ 09:40:00.
+	now := time.Date(2023, 9, 15, 9, 10, 0, 0, time.UTC)
+
+	// 6-minute walk → cutoff 09:16:00. The 68 (09:15:50) is too soon and is
+	// dropped; the 49 and 27 remain.
+	arrivals := QueryArrivals(db, ls, "1358", now, 60, 6, nil)
+	for _, a := range arrivals {
+		if a.RouteShort == "68" {
+			t.Errorf("68 (5m50s away) should be hidden by a 6-minute walk")
+		}
+	}
+	if len(arrivals) != 2 {
+		t.Errorf("expected 2 arrivals after walking filter, got %d", len(arrivals))
+	}
+
+	// 0-minute walk → no filtering: the 68 reappears.
+	all := QueryArrivals(db, ls, "1358", now, 60, 0, nil)
+	found68 := false
+	for _, a := range all {
+		if a.RouteShort == "68" {
+			found68 = true
+		}
+	}
+	if !found68 {
+		t.Error("68 should be present with walking time 0")
+	}
+
+	// Strictly-under: with now 09:10:50 and a 5-minute walk the cutoff is
+	// exactly 09:15:50 — the 68 arrives at the cutoff and must still show.
+	edge := time.Date(2023, 9, 15, 9, 10, 50, 0, time.UTC)
+	edgeArrivals := QueryArrivals(db, ls, "1358", edge, 60, 5, nil)
+	found68 = false
+	for _, a := range edgeArrivals {
+		if a.RouteShort == "68" {
+			found68 = true
+		}
+	}
+	if !found68 {
+		t.Error("68 arriving exactly at the cutoff should be shown (strictly-under)")
 	}
 }
 
@@ -241,7 +290,7 @@ func TestQueryArrivalsRouteFilter(t *testing.T) {
 
 	filter := BuildRouteFilter([]string{"49"})
 	now := time.Date(2023, 9, 15, 9, 10, 0, 0, time.UTC)
-	arrivals := QueryArrivals(db, ls, "1358", now, 60, filter)
+	arrivals := QueryArrivals(db, ls, "1358", now, 60, 0, filter)
 
 	for _, a := range arrivals {
 		if a.RouteShort != "49" {
