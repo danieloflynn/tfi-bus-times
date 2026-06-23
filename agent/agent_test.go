@@ -16,9 +16,10 @@ import (
 
 // testServer is a configurable stand-in for the update server API.
 type testServer struct {
-	latestVersion string
-	downloadBody  string
-	configBody    string
+	latestVersion  string
+	downloadBody   string
+	downloadStatus int // 0 → 200 OK; set non-2xx to simulate a download failure
+	configBody     string
 
 	// captured
 	reportBody  []byte
@@ -36,6 +37,10 @@ func (ts *testServer) start(t *testing.T) *httptest.Server {
 		})
 	})
 	mux.HandleFunc("/download", func(w http.ResponseWriter, r *http.Request) {
+		if ts.downloadStatus != 0 {
+			w.WriteHeader(ts.downloadStatus)
+			return
+		}
 		io.WriteString(w, ts.downloadBody)
 	})
 	mux.HandleFunc("/api/tfi/v1/config_files/fetch", func(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +207,53 @@ func TestCheckBinary_FailureRecordsBadAndReports(t *testing.T) {
 	}
 	if ts.reportToken != "Bearer dev-token" {
 		t.Errorf("report auth = %q, want Bearer dev-token", ts.reportToken)
+	}
+}
+
+// TestCheckBinary_DownloadFailureReportsButNotBad verifies a failed *download*
+// (the ETXTBSY class of bug) is reported to the server for visibility but does
+// NOT blacklist the version: the binary is fine, the environment failed, so the
+// agent must be free to retry the same version next cycle.
+func TestCheckBinary_DownloadFailureReportsButNotBad(t *testing.T) {
+	ts := &testServer{latestVersion: "v2", downloadStatus: http.StatusInternalServerError}
+	srv := ts.start(t)
+	a, fu := newTestAgent(t, srv.URL)
+	a.deviceToken = "dev-token"
+	a.writeInstalledVersion("v1")
+
+	if err := a.checkBinary(context.Background()); err == nil {
+		t.Fatal("expected error when the download fails")
+	}
+	if fu.runCalled != 0 {
+		t.Errorf("runUpdate should not run after a failed download, got %d", fu.runCalled)
+	}
+	if ts.reportBody == nil {
+		t.Fatal("download failure should have been reported to the server")
+	}
+	var payload map[string]map[string]string
+	if err := json.Unmarshal(ts.reportBody, &payload); err != nil {
+		t.Fatalf("report body not valid JSON: %v", err)
+	}
+	ue, ok := payload["update_error"]
+	if !ok {
+		t.Fatalf("download failure should report the non-blacklisting update_error event, got %v", payload)
+	}
+	if ue["version"] != "v2" {
+		t.Errorf("reported version = %q, want v2", ue["version"])
+	}
+	if ue["stage"] != "download" {
+		t.Errorf("reported stage = %q, want download", ue["stage"])
+	}
+	if ts.reportToken != "Bearer dev-token" {
+		t.Errorf("report auth = %q, want Bearer dev-token", ts.reportToken)
+	}
+	// The crucial distinction from an install failure: a download failure must
+	// not blacklist a good release, and the marker must not advance.
+	if a.isBadVersion("v2") {
+		t.Error("a download failure must NOT mark the version bad")
+	}
+	if a.installedVersion() != "v1" {
+		t.Errorf("version marker should remain v1, got %q", a.installedVersion())
 	}
 }
 

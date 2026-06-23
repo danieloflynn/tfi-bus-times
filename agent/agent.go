@@ -279,7 +279,18 @@ func (a *Agent) checkBinary(ctx context.Context) error {
 	log.Printf("tfi-agent: new version %s (installed %q) — downloading", latest.Version, installed)
 	staged := filepath.Join(a.updaterCfg.StagingDir, binaryName)
 	if err := a.downloadFile(latest.DownloadURL, staged); err != nil {
-		return fmt.Errorf("downloading binary: %w", err)
+		// Report download failures centrally too — this is the step that silently
+		// failed every cycle (ETXTBSY), and with nothing reported the stuck device
+		// was invisible on the server. We do NOT mark the version bad here: a
+		// download failure is environmental (busy binary, disk full, network), not
+		// the release's fault, so we want to retry the same version next cycle
+		// rather than skip a perfectly good build forever.
+		err = fmt.Errorf("downloading binary to %s: %w", staged, err)
+		log.Printf("tfi-agent: %v — reporting", err)
+		if rErr := a.reportUpdateError(ctx, latest.Version, "download", err.Error()); rErr != nil {
+			log.Printf("tfi-agent: reporting download failure: %v", rErr)
+		}
+		return err
 	}
 
 	if err := a.runUpdate(a.updaterCfg); err != nil {
@@ -349,13 +360,37 @@ func (a *Agent) checkConfig(ctx context.Context) error {
 
 // --- failure reporting ---
 
+// reportFailure tells the server a release failed to install and was rolled
+// back, so it can mark that version bad. Use this ONLY for failures that are the
+// release's fault — it blacklists the version server-side.
 func (a *Agent) reportFailure(ctx context.Context, version, errMsg string) error {
+	return a.postReport(ctx, "release_failure", map[string]string{
+		"version": version,
+		"error":   errMsg,
+	})
+}
+
+// reportUpdateError surfaces a non-fatal, device-side update failure (e.g. a
+// download that never completed) to the server for visibility. Unlike
+// reportFailure it does NOT blacklist the version — the build is fine, the
+// environment failed — so the server should log it without marking the release
+// bad. `stage` records where in the update it broke (e.g. "download").
+func (a *Agent) reportUpdateError(ctx context.Context, version, stage, errMsg string) error {
+	return a.postReport(ctx, "update_error", map[string]string{
+		"version": version,
+		"stage":   stage,
+		"error":   errMsg,
+	})
+}
+
+// postReport POSTs {event: fields} to /releases/report under the device token.
+// The top-level event name is how the server tells a blacklisting
+// "release_failure" apart from an informational "update_error".
+func (a *Agent) postReport(ctx context.Context, event string, fields map[string]string) error {
 	if a.deviceToken == "" {
-		return fmt.Errorf("no device_token — cannot report failure")
+		return fmt.Errorf("no device_token — cannot report %s", event)
 	}
-	payload := map[string]map[string]string{
-		"release_failure": {"version": version, "error": errMsg},
-	}
+	payload := map[string]map[string]string{event: fields}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
