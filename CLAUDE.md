@@ -73,6 +73,8 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 The API origin (`base_url`) and `device_token` live in `secrets.yaml`, not `config.yaml` — the agent overwrites `config.yaml` on each sync but never touches `secrets.yaml`, so the bootstrap "where is home" survives. `secrets.yaml` is gitignored, keeping the real URL out of this public repo. If `base_url` is unset the agent logs and skips.
 
+Downloaded binaries are staged to a **dedicated directory** (`/var/lib/tfi-agent/staging`), never the directory the agent runs from. The agent and `tfi-display` are both installed in `/usr/local/bin`, so `updater.DefaultConfig`'s exe-dir staging default would write the download straight onto the running `/usr/local/bin/tfi-display` — which the kernel rejects with `ETXTBSY` ("text file busy"), stranding the device on its old binary every cycle. `agent.New` overrides `StagingDir` to the dedicated path; `updater.Run` then installs from there via the atomic `.new` + rename path, which *is* permitted over a running executable.
+
 **Non-obvious code must have comments** — whenever a piece of code does something that isn't immediately clear from reading it (e.g. the 12-hour overnight rule, BOM stripping in CSV headers, backoff logic), add an inline comment explaining _why_, not just _what_. Also update this file to document any new patterns introduced.
 
 ---

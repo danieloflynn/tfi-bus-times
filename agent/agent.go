@@ -39,7 +39,15 @@ const (
 	// defaultBadVersionsFile lists versions that failed to install, so the agent
 	// does not retry them every cycle. Persisted so it survives agent restarts.
 	defaultBadVersionsFile = "/var/lib/tfi-agent/bad-versions"
-	binaryName             = "tfi-display"
+	// defaultStagingDir is where downloaded binaries land before install. It must
+	// NOT be the directory holding the live tfi-display binary: the agent and
+	// tfi-display are both installed in /usr/local/bin, and updater.DefaultConfig
+	// would otherwise stage to the agent's own dir — i.e. straight onto the
+	// running /usr/local/bin/tfi-display, which the kernel refuses with ETXTBSY
+	// ("text file busy"). updater.Run installs from here atomically (.new +
+	// rename), which *is* allowed over a running executable.
+	defaultStagingDir = "/var/lib/tfi-agent/staging"
+	binaryName        = "tfi-display"
 	httpTimeout            = 30 * time.Second
 	// defaultRetryAttempts/Delay ride out the 502s a scale-to-zero host (e.g.
 	// fly.io, Cloud Run) returns while it cold-starts: the first request triggers
@@ -81,6 +89,9 @@ func New(configPath, secretsPath string) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Override the exe-dir staging default: the agent downloads the binary itself
+	// and must not write onto the running tfi-display it lives beside (ETXTBSY).
+	uc.StagingDir = defaultStagingDir
 	return &Agent{
 		configPath:      configPath,
 		secretsPath:     secretsPath,

@@ -95,6 +95,27 @@ func (f *fakeUpdater) apply(content []byte, _, _ string, _ time.Duration) error 
 	return f.applyErr
 }
 
+// --- construction ---
+
+// TestNew_StagesAwayFromLiveBinary guards against the ETXTBSY regression: the
+// agent must not download new releases onto the running tfi-display it sits
+// beside in /usr/local/bin. The staged path has to differ from the install
+// target, otherwise the download fails every cycle with "text file busy" and
+// the device is stuck on its old binary.
+func TestNew_StagesAwayFromLiveBinary(t *testing.T) {
+	a, err := New("/etc/tfi-display/config.yaml", "/etc/tfi-display/secrets.yaml")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if a.updaterCfg.StagingDir != defaultStagingDir {
+		t.Errorf("StagingDir = %q, want dedicated %q", a.updaterCfg.StagingDir, defaultStagingDir)
+	}
+	staged := filepath.Join(a.updaterCfg.StagingDir, binaryName)
+	if staged == a.updaterCfg.TargetBinary {
+		t.Errorf("staged download path %q must differ from live target %q (writing onto a running binary fails with ETXTBSY)", staged, a.updaterCfg.TargetBinary)
+	}
+}
+
 // --- binary sync ---
 
 func TestCheckBinary_InstallsWhenDifferent(t *testing.T) {
