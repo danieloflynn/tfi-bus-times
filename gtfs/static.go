@@ -90,6 +90,41 @@ func LoadOrBuild(staticURL, dataDir string, filterStops []string) (*StaticDB, er
 	return db, nil
 }
 
+// MaybeRebuild is the running-process counterpart to LoadOrBuild's startup
+// freshness check. It re-checks the upstream GTFS static feed and, when a newer
+// ZIP is available (compared against currentTimestamp via the Last-Modified
+// header), downloads + parses it and persists the refreshed gob cache. Returns:
+//
+//   - (db, nil)  when a newer feed was downloaded and parsed;
+//   - (nil, nil) when the cache is already current (nothing to do);
+//   - (nil, err) when the rebuild failed (the check failing is treated as
+//     "nothing to do", consistent with isNewerZIPAvailable's own logging).
+//
+// Without periodic rebuilding the in-memory dataset is only ever loaded at
+// startup, so after TFI republishes the static feed (~weekly) the realtime trip
+// IDs stop matching p.db.Trips and every arrival falls back to its scheduled
+// time until the process is restarted.
+func MaybeRebuild(staticURL, dataDir string, filterStops []string, currentTimestamp time.Time) (*StaticDB, error) {
+	if !isNewerZIPAvailable(staticURL, currentTimestamp) {
+		return nil, nil
+	}
+	// Sort to match LoadOrBuild so the persisted FilterStops stays canonical and
+	// the cache validates cleanly on the next startup.
+	sort.Strings(filterStops)
+	db, err := buildFromURL(staticURL, filterStops)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating data dir: %w", err)
+	}
+	cachePath := filepath.Join(dataDir, "static_cache.gob")
+	if err := saveGob(cachePath, db); err != nil {
+		slog.Warn("failed to save gob cache", "err", err)
+	}
+	return db, nil
+}
+
 // isNewerZIPAvailable does a HEAD request and compares Last-Modified.
 func isNewerZIPAvailable(url string, cached time.Time) bool {
 	resp, err := http.Head(url)

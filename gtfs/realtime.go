@@ -120,16 +120,19 @@ func (ls *LiveStore) GetAdditions(stopNumber string) []Addition {
 
 // Poller polls the GTFS-RT endpoint on a ticker and updates the LiveStore.
 type Poller struct {
-	url   string
+	url    string
 	apiKey string
-	db    *StaticDB // needed to resolve stop_id → stop_number
+	// db is a holder, not a fixed *StaticDB: the static dataset is rebuilt in the
+	// background while the process runs, so each parse loads the current snapshot.
+	db    *DB
 	store *LiveStore
 
 	rateLimitCount int
 }
 
-// NewPoller creates a Poller for the given GTFS-RT endpoint.
-func NewPoller(url, apiKey string, db *StaticDB) *Poller {
+// NewPoller creates a Poller for the given GTFS-RT endpoint. db is a holder so
+// the poller picks up background static-data refreshes without being recreated.
+func NewPoller(url, apiKey string, db *DB) *Poller {
 	return &Poller{
 		url:    url,
 		apiKey: apiKey,
@@ -223,6 +226,10 @@ func (p *Poller) parse(data []byte) error {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 
+	// Snapshot the static dataset once for the whole parse so a mid-parse
+	// background refresh can't make trip lookups inconsistent.
+	db := p.db.Load()
+
 	feedTS := int64(0)
 	if feed.Header != nil {
 		feedTS = int64(feed.Header.GetTimestamp())
@@ -265,12 +272,12 @@ func (p *Poller) parse(data []byte) error {
 				if stu.GetArrival().GetTime() == 0 {
 					continue
 				}
-				stopNumber := p.resolveStopID(stu.GetStopId())
+				stopNumber := resolveStopID(db, stu.GetStopId())
 				if stopNumber == "" {
 					continue
 				}
 				// Resolve route short name from our static data.
-				routeShort := p.routeShortName(routeID)
+				routeShort := routeShortName(db, routeID)
 				arr := Addition{
 					RouteShortName: routeShort,
 					ArrivalTime:    time.Unix(stu.GetArrival().GetTime(), 0),
@@ -292,7 +299,7 @@ func (p *Poller) parse(data []byte) error {
 		}
 
 		// Scheduled trip.
-		if _, ok := p.db.Trips[tripID]; !ok {
+		if _, ok := db.Trips[tripID]; !ok {
 			nUnknown++
 			continue
 		}
@@ -347,9 +354,9 @@ func (p *Poller) parse(data []byte) error {
 
 // resolveStopID converts a stop_id from the RT feed to a stop_number.
 // Many TFI feeds use the stop number directly as the stop_id.
-func (p *Poller) resolveStopID(stopID string) string {
+func resolveStopID(db *StaticDB, stopID string) string {
 	// If the stopID is directly in our StopNames (i.e. it is a stop number), use it.
-	if _, ok := p.db.StopNames[stopID]; ok {
+	if _, ok := db.StopNames[stopID]; ok {
 		return stopID
 	}
 	// Check if any of our stops have this as their ID (heuristic: TFI uses numeric IDs).
@@ -358,8 +365,8 @@ func (p *Poller) resolveStopID(stopID string) string {
 }
 
 // routeShortName returns the short name for a route_id from the static data.
-func (p *Poller) routeShortName(routeID string) string {
-	if name, ok := p.db.RouteShortNames[routeID]; ok {
+func routeShortName(db *StaticDB, routeID string) string {
+	if name, ok := db.RouteShortNames[routeID]; ok {
 		return name
 	}
 	return routeID

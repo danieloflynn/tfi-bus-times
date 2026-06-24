@@ -58,6 +58,23 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.PageIntervalSec != 5 {
 		t.Errorf("default PageIntervalSec = %d, want 5", cfg.PageIntervalSec)
 	}
+	if cfg.StaticRefreshSec != 86400 {
+		t.Errorf("default StaticRefreshSec = %d, want 86400", cfg.StaticRefreshSec)
+	}
+}
+
+// A negative static_refresh_seconds is an explicit opt-out and must be preserved
+// (the refresher treats <= 0 as disabled), not overwritten by the default.
+func TestLoad_StaticRefreshDisabled(t *testing.T) {
+	p := writeTemp(t, "config.yaml", `api_key: "k"
+static_refresh_seconds: -1`+validStops)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.StaticRefreshSec != -1 {
+		t.Errorf("StaticRefreshSec = %d, want -1 (disabled, preserved)", cfg.StaticRefreshSec)
+	}
 }
 
 func TestLoad_WalkingMinutes(t *testing.T) {

@@ -51,6 +51,17 @@ max_pages: 2
 max_minutes: 90
 
 # -----------------------------------------------------------------------
+# How often (seconds) to re-check the upstream GTFS static feed and rebuild
+# the in-memory dataset while running.  TFI republishes the static feed
+# roughly weekly and the trip IDs change when it does; without this the data
+# goes stale and realtime updates stop matching, so every arrival reverts to
+# its scheduled time until the next restart.  Default: 86400 (daily).
+# Rebuilding is CPU-heavy, so if a wake/sleep schedule is set the refresh is
+# preferred during off-hours (overnight).  A negative value disables it.
+# -----------------------------------------------------------------------
+# static_refresh_seconds: 86400
+
+# -----------------------------------------------------------------------
 # Display: 7" LCD HAT via /dev/fb0.
 # framebuffer_device defaults to "/dev/fb0" — omit if that's your device.
 # -----------------------------------------------------------------------

@@ -47,8 +47,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Hold the static DB behind an atomic pointer so the background refresher can
+	// swap in a freshly rebuilt dataset while the poller and render loop keep
+	// reading a consistent snapshot.
+	dbHolder := gtfs.NewDB(db)
+
 	// --- Live store & poller ---
-	poller := gtfs.NewPoller(cfg.LiveURL, cfg.APIKey, db)
+	poller := gtfs.NewPoller(cfg.LiveURL, cfg.APIKey, dbHolder)
 	live := poller.Store()
 
 	// Initial live data fetch.
@@ -106,6 +111,52 @@ func main() {
 
 	// --- Goroutines ---
 
+	// Background static-data refresh. TFI republishes the static GTFS feed
+	// roughly weekly and the trip IDs change when it does; without a rebuild the
+	// in-memory dataset goes stale and realtime updates stop matching, so every
+	// arrival reverts to its scheduled time until the process is restarted.
+	// Rebuilding parses the whole ZIP and is CPU-heavy, so we prefer to do it
+	// while the display is asleep (overnight). A non-positive interval disables it.
+	if cfg.StaticRefreshSec > 0 {
+		go func() {
+			interval := time.Duration(cfg.StaticRefreshSec) * time.Second
+			// Check more often than the interval so we can seize a sleep window
+			// promptly once one opens; the elapsed-time gate below keeps actual
+			// network calls down to ~once per interval.
+			check := time.NewTicker(15 * time.Minute)
+			defer check.Stop()
+			lastRefresh := time.Now() // DB was just built/validated at startup
+			for range check.C {
+				if time.Since(lastRefresh) < interval {
+					continue
+				}
+				// Prefer off-hours: if a schedule is configured and the display is
+				// currently active, defer the rebuild — unless we've gone well past
+				// the interval (2×), in which case refresh anyway so data can't go
+				// stale on an always-on or rarely-sleeping board.
+				if schedEnabled && isActiveTime(time.Now(), schedStart, schedStop) &&
+					time.Since(lastRefresh) < 2*interval {
+					continue
+				}
+				cur := dbHolder.Load()
+				newDB, err := gtfs.MaybeRebuild(cfg.StaticURL, cfg.DataDir, stopNumbers, cur.Timestamp)
+				lastRefresh = time.Now()
+				if err != nil {
+					slog.Warn("static refresh failed", "err", err)
+					continue
+				}
+				if newDB != nil {
+					dbHolder.Store(newDB)
+					slog.Info("static data refreshed",
+						"trips", len(newDB.Trips),
+						"timestamp", newDB.Timestamp.Format(time.RFC3339))
+				} else {
+					slog.Debug("static data already current")
+				}
+			}
+		}()
+	}
+
 	// Live data poller.
 	go func() {
 		base := cfg.PollIntervalSec
@@ -138,7 +189,7 @@ func main() {
 
 	// Render immediately on start (if awake).
 	if !sleeping {
-		renderAndDisplay(drv, db, live, cfg, routeFilter, page)
+		renderAndDisplay(drv, dbHolder, live, cfg, routeFilter, page)
 	}
 
 	// Signal handler for graceful shutdown.
@@ -155,7 +206,7 @@ func main() {
 					slog.Warn("display wake failed", "err", err)
 				}
 				sleeping = false
-				renderAndDisplay(drv, db, live, cfg, routeFilter, page)
+				renderAndDisplay(drv, dbHolder, live, cfg, routeFilter, page)
 			} else if !sleeping && !active {
 				slog.Info("outside active hours — sleeping display")
 				drv.Clear()
@@ -166,12 +217,12 @@ func main() {
 			}
 		case <-refreshTicker.C:
 			if !sleeping {
-				renderAndDisplay(drv, db, live, cfg, routeFilter, page)
+				renderAndDisplay(drv, dbHolder, live, cfg, routeFilter, page)
 			}
 		case <-pageTicker.C:
 			if !sleeping {
 				page++
-				renderAndDisplay(drv, db, live, cfg, routeFilter, page)
+				renderAndDisplay(drv, dbHolder, live, cfg, routeFilter, page)
 			}
 		case sig := <-quit:
 			slog.Info("shutting down", "signal", sig)
@@ -201,12 +252,14 @@ func isActiveTime(now, start, stop time.Time) bool {
 // page selects which window of cfg.PageSize arrivals to show; it wraps per-section.
 func renderAndDisplay(
 	drv driver.Driver,
-	db *gtfs.StaticDB,
+	dbHolder *gtfs.DB,
 	live *gtfs.LiveStore,
 	cfg *config.Config,
 	routeFilter map[string]bool,
 	page int,
 ) {
+	// Load the current snapshot each render so a background refresh is picked up.
+	db := dbHolder.Load()
 	now := time.Now()
 	updated := live.PollTime()
 	if updated.IsZero() {
