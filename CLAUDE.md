@@ -53,6 +53,10 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 **GTFS static caching** — `LoadOrBuild` writes a gob file after the first parse. On subsequent starts it validates schema version, the configured stop list, and the upstream `Last-Modified` header before reusing the cache. Rebuilding is triggered automatically when any of these change.
 
+**Background static refresh** — the in-memory `StaticDB` was historically built only at startup and never refreshed. TFI republishes the static feed roughly weekly and the trip IDs change when it does; the *realtime* feed immediately switches to the new IDs, so a long-running process holding a stale `StaticDB` fails every `db.Trips[tripID]` lookup in `realtime.parse` and drops all updates — making every arrival revert to its scheduled time (fixed only by a restart). `gtfs.MaybeRebuild` is the running-process counterpart to `LoadOrBuild`'s startup check: it re-checks `Last-Modified` and, when newer, rebuilds + re-persists the gob. A goroutine in `main.go` runs it on `static_refresh_seconds` (default daily). Because a rebuild parses the whole ZIP and is CPU-heavy, when a wake/sleep schedule is configured the refresh is deferred to off-hours (display asleep) — unless more than 2× the interval has elapsed, in which case it runs anyway so an always-on board can't go stale.
+
+**Concurrent StaticDB swap** — the static dataset is shared between the poller goroutine and the render loop, and the background refresher replaces it live. `gtfs.DB` (`db.go`) wraps it in an `atomic.Pointer[StaticDB]`: `NewPoller` and `renderAndDisplay` take the holder and call `Load()` each time they need the dataset; the refresher calls `Store()` to swap. `parse` snapshots once via `Load()` at the top so a mid-parse swap can't make trip lookups inconsistent. Never capture the `*StaticDB` once and hold it across cycles — that reintroduces the stale-data bug.
+
 **Hour-bucket indexing** — `StaticDB.StopTimes` is indexed `stopNumber → hour → []StopTime`. `QueryArrivals` scans only the relevant hour buckets (current hour ±1 plus lookahead), keeping query time sub-millisecond even for large feeds.
 
 **12-hour rule for overnight trips** — GTFS allows arrival times > 24:00 (e.g. `25:30:00`). When reconstructing wall-clock time, if the scheduled seconds-since-midnight is more than 12 hours behind `now`, the arrival is treated as belonging to the next calendar day.
@@ -121,6 +125,7 @@ Key fields:
 | `stops[].walking_minutes`      | 0 (off)       | Hide arrivals sooner than this many minutes (walk time) |
 | `routes`                       | (all)         | Optional whitelist of route short names             |
 | `poll_interval_seconds`        | 60            | How often to fetch live data                        |
+| `static_refresh_seconds`       | 86400 (daily) | How often to rebuild static GTFS data while running; prefers off-hours; negative disables |
 | `page_interval_seconds`        | 5             | How often to advance the arrival page               |
 | `max_pages`                    | 0 (unlimited) | Cap on page cycling per section                     |
 | `max_minutes`                  | 90            | Lookahead window for arrivals                       |

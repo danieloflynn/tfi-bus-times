@@ -28,6 +28,12 @@ type Config struct {
 	Stops             []StopConfig `yaml:"stops"`
 	Routes            []string     `yaml:"routes"` // empty = show all routes
 	PollIntervalSec   int          `yaml:"poll_interval_seconds"`
+	// StaticRefreshSec is how often (seconds) the running process re-checks the
+	// upstream GTFS static feed and rebuilds its in-memory dataset. TFI
+	// republishes the feed ~weekly and the trip IDs change when it does, so
+	// without this the dataset goes stale and realtime updates stop matching.
+	// 0 = daily default (86400); a negative value disables periodic refresh.
+	StaticRefreshSec  int          `yaml:"static_refresh_seconds"`
 	MaxMinutes        int          `yaml:"max_minutes"`
 	MaxPages          int          `yaml:"max_pages"`             // max pages to cycle (0 = unlimited)
 	PageIntervalSec   int          `yaml:"page_interval_seconds"` // seconds between pages (default: 5)
@@ -64,6 +70,11 @@ func loadFile(path string) (*Config, error) {
 	}
 	if cfg.PollIntervalSec == 0 {
 		cfg.PollIntervalSec = 60
+	}
+	// 0 means "unset" → daily refresh. A negative value is an explicit opt-out
+	// (the refresher treats <= 0 as disabled), so leave negatives untouched.
+	if cfg.StaticRefreshSec == 0 {
+		cfg.StaticRefreshSec = 86400
 	}
 	if cfg.MaxMinutes == 0 {
 		cfg.MaxMinutes = 90

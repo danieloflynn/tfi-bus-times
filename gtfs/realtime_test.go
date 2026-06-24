@@ -28,7 +28,7 @@ func TestParseLiveResponseFile(t *testing.T) {
 	}
 
 	db := makeTestDB()
-	poller := NewPoller("", "test", db)
+	poller := NewPoller("", "test", NewDB(db))
 
 	if err := poller.parse(data); err != nil {
 		t.Fatalf("parse failed: %v", err)
@@ -91,7 +91,7 @@ func TestProtoUnmarshal(t *testing.T) {
 
 	db := makeTestDB()
 	db.Trips["test_trip"] = Trip{RouteShort: "99", ServiceID: "200", Headsign: "Test"}
-	poller := NewPoller("", "test", db)
+	poller := NewPoller("", "test", NewDB(db))
 	if err := poller.parse(data); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
