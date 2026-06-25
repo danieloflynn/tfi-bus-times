@@ -302,6 +302,97 @@ func TestQueryArrivalsRouteFilter(t *testing.T) {
 	}
 }
 
+// TestQueryArrivalsSevereDelayRescued verifies that a trip delayed well beyond
+// the old single-hour lookback (its scheduled bucket hours in the past) is still
+// surfaced once realtime data places its effective arrival in the future.
+func TestQueryArrivalsSevereDelayRescued(t *testing.T) {
+	db := makeTestDB()
+	ls := NewLiveStore()
+
+	// Trip 3582_6405 (route 27) is scheduled at 09:40 (seq 78). "now" is 11:30,
+	// so the schedule is ~1h50m in the past — outside the old 1h lookback.
+	now := time.Date(2023, 9, 15, 11, 30, 0, 0, time.UTC)
+	// Realtime says it will actually arrive at 11:35 (heavily delayed).
+	expected := time.Date(2023, 9, 15, 11, 35, 0, 0, time.UTC)
+	ls.Delays["3582_6405"] = []StopDelay{{StopSequence: 78, AbsTime: expected.Unix()}}
+
+	arrivals := QueryArrivals(db, ls, "1358", now, 60, 0, nil)
+
+	var a27 *Arrival
+	for i := range arrivals {
+		if arrivals[i].RouteShort == "27" {
+			a27 = &arrivals[i]
+			break
+		}
+	}
+	if a27 == nil {
+		t.Fatal("severely delayed route 27 should be rescued by the widened lookback")
+	}
+	if !a27.RealtimeTime.Equal(expected) {
+		t.Errorf("rescued arrival realtime: want %v, got %v", expected, a27.RealtimeTime)
+	}
+}
+
+// TestQueryArrivalsDelayBeyondLookbackDropped documents the bound: a trip whose
+// schedule is further in the past than lookbackHours is no longer matched, even
+// with realtime data, because its bucket is never scanned.
+func TestQueryArrivalsDelayBeyondLookbackDropped(t *testing.T) {
+	db := makeTestDB()
+	ls := NewLiveStore()
+
+	// Schedule 09:40; "now" is 09:40 + lookbackHours + 1h, so the bucket is out
+	// of range. Realtime still claims an imminent arrival.
+	now := time.Date(2023, 9, 15, 9, 40, 0, 0, time.UTC).
+		Add(time.Duration(lookbackHours+1) * time.Hour)
+	expected := now.Add(2 * time.Minute)
+	ls.Delays["3582_6405"] = []StopDelay{{StopSequence: 78, AbsTime: expected.Unix()}}
+
+	arrivals := QueryArrivals(db, ls, "1358", now, 60, 0, nil)
+	for _, a := range arrivals {
+		if a.RouteShort == "27" {
+			t.Errorf("route 27 delayed beyond lookbackHours (%dh) should not appear", lookbackHours)
+		}
+	}
+}
+
+// TestQueryArrivalsAddedUnresolvedRouteBypassesFilter verifies that an added
+// trip whose route could not be resolved is shown even under a route whitelist,
+// while a resolved added route not on the whitelist is still filtered out.
+func TestQueryArrivalsAddedUnresolvedRouteBypassesFilter(t *testing.T) {
+	db := makeTestDB()
+	ls := NewLiveStore()
+
+	now := time.Date(2023, 9, 15, 9, 10, 0, 0, time.UTC)
+	ls.Additions["1358"] = []Addition{
+		// Unresolved route (raw route_id) — must be shown despite the whitelist.
+		{RouteShortName: "RT_NEW_99", ArrivalTime: now.Add(20 * time.Minute), RouteResolved: false},
+		// Resolved route not on the whitelist — must be filtered out.
+		{RouteShortName: "145", ArrivalTime: now.Add(25 * time.Minute), RouteResolved: true},
+	}
+
+	filter := BuildRouteFilter([]string{"68"})
+	arrivals := QueryArrivals(db, ls, "1358", now, 60, 0, filter)
+
+	var sawUnresolved, sawResolved bool
+	for _, a := range arrivals {
+		if a.RouteShort == "RT_NEW_99" {
+			sawUnresolved = true
+			if !a.IsAdded {
+				t.Error("unresolved addition should be marked IsAdded")
+			}
+		}
+		if a.RouteShort == "145" {
+			sawResolved = true
+		}
+	}
+	if !sawUnresolved {
+		t.Error("added trip with unresolved route should bypass the whitelist and be shown")
+	}
+	if sawResolved {
+		t.Error("added trip with resolved route off the whitelist should be filtered out")
+	}
+}
+
 // TestParseGTFSTime verifies overnight time parsing.
 func TestParseGTFSTime(t *testing.T) {
 	cases := []struct {

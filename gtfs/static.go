@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const schemaVer = 2
+const schemaVer = 3
 
 // StopTime represents one scheduled visit of a trip to a stop.
 type StopTime struct {
@@ -50,6 +50,12 @@ type StaticDB struct {
 	StopNames       map[string]string // stopNumber → human name
 	StopPlatforms   map[string]string // stopNumber → platform_code (empty if not present)
 	RouteShortNames map[string]string // routeID → route_short_name
+	// StopIDToNumber maps a GTFS stop_id to its stop_number (stop_code), but
+	// only for our configured stops and only where the two differ. The realtime
+	// feed sometimes identifies a stop by its raw stop_id rather than the
+	// stop_code we key everything else by (notably for rail), so added trips
+	// would otherwise be filed under an unrecognised stop and never shown.
+	StopIDToNumber map[string]string
 	Timestamp       time.Time         // ZIP Last-Modified (used for cache invalidation)
 	FilterStops     []string          // sorted list of stop numbers used during build
 	SchemaVer       int
@@ -204,6 +210,7 @@ func buildFromZIPFile(path string, zipTime time.Time, filterStops []string) (*St
 		StopNames:       make(map[string]string),
 		StopPlatforms:   make(map[string]string),
 		RouteShortNames: make(map[string]string),
+		StopIDToNumber:  make(map[string]string),
 		Timestamp:       zipTime,
 		FilterStops:     filterStops,
 		SchemaVer:       schemaVer,
@@ -232,6 +239,14 @@ func buildFromZIPFile(path string, zipTime time.Time, filterStops []string) (*St
 		}
 		stopIDToNumber[stopID] = stopCode
 		db.StopNames[stopCode] = stopName
+		// Persist the stop_id → stop_number mapping, but only for the stops we
+		// actually watch and only when the id differs from the code (otherwise
+		// resolveStopID handles it directly). Scoping to filterStops keeps this
+		// map tiny — a handful of entries — rather than carrying every stop in
+		// the network in the gob and in memory.
+		if stopID != stopCode && (len(filterSet) == 0 || filterSet[stopCode]) {
+			db.StopIDToNumber[stopID] = stopCode
+		}
 		if idx, ok := header["platform_code"]; ok && idx < len(row) {
 			if p := strings.TrimSpace(row[idx]); p != "" {
 				db.StopPlatforms[stopCode] = p

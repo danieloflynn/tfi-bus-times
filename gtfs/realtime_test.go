@@ -108,3 +108,73 @@ func TestProtoUnmarshal(t *testing.T) {
 	_ = ptrInt32
 	_ = ptrUint32
 }
+
+// TestParseAddedTripResolution exercises the hardened added-trip path: a stop
+// identified by its raw GTFS stop_id (resolved via StopIDToNumber), an event
+// carrying only a departure time (arrival-time fallback), and a route_id absent
+// from the static feed (RouteResolved=false).
+func TestParseAddedTripResolution(t *testing.T) {
+	db := makeTestDB()
+	// The realtime feed will reference the stop by its raw id, not its number.
+	db.StopIDToNumber = map[string]string{"RAIL_8400": "1358"}
+
+	departTS := uint64(1694771700)
+	seq := uint32(1)
+	added := gtfsrt.TripDescriptor_ADDED
+
+	feed := &gtfsrt.FeedMessage{
+		Header: &gtfsrt.FeedHeader{
+			GtfsRealtimeVersion: ptrString("2.0"),
+			Timestamp:           ptrUint64(1694771400),
+		},
+		Entity: []*gtfsrt.FeedEntity{
+			{
+				Id: ptrString("add1"),
+				TripUpdate: &gtfsrt.TripUpdate{
+					Trip: &gtfsrt.TripDescriptor{
+						TripId:               ptrString("added_trip_1"),
+						RouteId:              ptrString("brand_new_route"),
+						ScheduleRelationship: &added,
+					},
+					StopTimeUpdate: []*gtfsrt.TripUpdate_StopTimeUpdate{
+						{
+							StopSequence: &seq,
+							StopId:       ptrString("RAIL_8400"),
+							// Departure only — arrival absent, must fall back.
+							Departure: &gtfsrt.TripUpdate_StopTimeEvent{
+								Time: ptrInt64(int64(departTS)),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	data, err := proto.Marshal(feed)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	poller := NewPoller("", "test", NewDB(db))
+	if err := poller.parse(data); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	adds := poller.Store().GetAdditions("1358")
+	if len(adds) != 1 {
+		t.Fatalf("expected 1 addition under resolved stop 1358, got %d", len(adds))
+	}
+	a := adds[0]
+	if a.RouteResolved {
+		t.Error("route brand_new_route is not in static data; RouteResolved should be false")
+	}
+	if a.RouteShortName != "brand_new_route" {
+		t.Errorf("unresolved route should keep raw id, got %q", a.RouteShortName)
+	}
+	if a.ArrivalTime.Unix() != int64(departTS) {
+		t.Errorf("arrival time should fall back to departure %d, got %d", departTS, a.ArrivalTime.Unix())
+	}
+}
+
+func ptrInt64(i int64) *int64 { return &i }
