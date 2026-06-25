@@ -1,9 +1,17 @@
 package gtfs
 
 import (
+	"log/slog"
 	"sort"
 	"time"
 )
+
+// lookbackHours is how many hours of scheduled stop-time buckets QueryArrivals
+// scans before the current hour. It bounds the maximum delay we can still
+// surface (a trip delayed more than this past its schedule is no longer
+// matched). Three hours covers realistic disruption delays while keeping the
+// per-query scan trivially cheap.
+const lookbackHours = 3
 
 // Arrival is one upcoming bus arrival as shown on the display.
 type Arrival struct {
@@ -80,16 +88,19 @@ func QueryArrivals(
 	// exactly at the cutoff are still shown (strictly-under semantics).
 	walkCutoff := now.Add(time.Duration(minMinutes) * time.Minute)
 
-	// Determine which hour buckets to scan.
-	// We look back 1 hour (to catch delayed buses) and forward enough to fill window.
+	// Determine which hour buckets to scan. Stop times are bucketed by their
+	// *scheduled* hour, so to surface a severely delayed trip we must scan the
+	// bucket its schedule falls in, which can be hours before now. We look back
+	// lookbackHours (to catch such delays) and forward enough to fill the window.
+	// Previously the lookback was a single hour, which dropped any trip delayed
+	// more than ~1h: its scheduled bucket was never scanned, the realtime overlay
+	// never applied, and the arrival vanished — exactly what happens during major
+	// disruptions. Scanning a few extra buckets is sub-millisecond.
 	extraHours := maxMinutes/60 + 2
 	var tryHours []int
-	startHour := now.Hour() - 1
-	if startHour < 0 {
-		startHour = 23
-	}
+	startHour := ((now.Hour()-lookbackHours)%24 + 24) % 24
 	seen := make(map[int]bool)
-	for i := 0; i <= extraHours+1; i++ {
+	for i := 0; i <= lookbackHours+extraHours+1; i++ {
 		h := (startHour + i) % 24
 		if !seen[h] {
 			tryHours = append(tryHours, h)
@@ -164,6 +175,19 @@ func QueryArrivals(
 				continue
 			}
 
+			// Diagnostic: a trip whose schedule is more than an hour before now
+			// would have been dropped by the old single-hour lookback. Logging it
+			// once per poll confirms when the widened window is what's keeping a
+			// severely delayed service on the board.
+			if !realtimeTime.IsZero() && scheduledTime.Before(now.Add(-time.Hour)) &&
+				live.DiagLogOnce("delay|"+st.TripID) {
+				slog.Info("rescued severely-delayed arrival (outside old 1h lookback)",
+					"stop", stopNumber, "route", trip.RouteShort,
+					"scheduled", scheduledTime.Format("15:04"),
+					"expected", realtimeTime.Format("15:04"),
+					"delay_min", delayMin)
+			}
+
 			arrivals = append(arrivals, Arrival{
 				RouteShort:    trip.RouteShort,
 				Platform:      db.StopPlatforms[stopNumber],
@@ -177,7 +201,11 @@ func QueryArrivals(
 
 	// Add realtime additions.
 	for _, add := range live.GetAdditions(stopNumber) {
-		if len(routeFilter) > 0 && !routeFilter[add.RouteShortName] {
+		// Apply the route whitelist only when the route resolved to a real short
+		// name. An unresolved route (raw route_id) can't be matched against the
+		// whitelist, and these are typically the brand-new replacement services a
+		// disruption spins up — show them rather than silently dropping them.
+		if len(routeFilter) > 0 && add.RouteResolved && !routeFilter[add.RouteShortName] {
 			continue
 		}
 		if add.ArrivalTime.Before(now) || add.ArrivalTime.After(windowEnd) {
@@ -186,6 +214,15 @@ func QueryArrivals(
 		// Skip if it arrives sooner than we can walk there.
 		if minMinutes > 0 && add.ArrivalTime.Before(walkCutoff) {
 			continue
+		}
+		// Diagnostic: confirms an added (unscheduled) service is being shown, and
+		// whether its route had to be shown unfiltered because it couldn't be
+		// resolved against the static feed.
+		if live.DiagLogOnce("add|" + stopNumber + "|" + add.RouteShortName + "|" + add.ArrivalTime.Format("1504")) {
+			slog.Info("showing added (unscheduled) arrival",
+				"stop", stopNumber, "route", add.RouteShortName,
+				"route_resolved", add.RouteResolved,
+				"arrival", add.ArrivalTime.Format("15:04"))
 		}
 		arrivals = append(arrivals, Arrival{
 			RouteShort:    add.RouteShortName,

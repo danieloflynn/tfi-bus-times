@@ -28,6 +28,11 @@ type Addition struct {
 	RouteShortName string
 	ArrivalTime    time.Time
 	FeedTimestamp  int64
+	// RouteResolved is true when RouteShortName came from the static feed. When
+	// false the route_id was not in routes.txt (e.g. a brand-new disruption
+	// route) and RouteShortName holds the raw id; QueryArrivals shows such
+	// additions even under a route whitelist rather than dropping them.
+	RouteResolved bool
 }
 
 // LiveStore holds in-memory realtime data protected by a RWMutex.
@@ -41,6 +46,10 @@ type LiveStore struct {
 	Additions    map[string][]Addition
 	LastFeedTime time.Time
 	LastPollTime time.Time
+	// diagLogged deduplicates one-shot diagnostic ("rescue") logs so they fire at
+	// most once per poll cycle instead of on every render/page tick. It is reset
+	// each time a fresh feed is parsed.
+	diagLogged map[string]bool
 }
 
 // NewLiveStore returns an initialised LiveStore.
@@ -49,7 +58,22 @@ func NewLiveStore() *LiveStore {
 		Delays:        make(map[string][]StopDelay),
 		Cancellations: make(map[string]time.Time),
 		Additions:     make(map[string][]Addition),
+		diagLogged:    make(map[string]bool),
 	}
+}
+
+// DiagLogOnce reports whether key has not yet been logged for the current feed
+// snapshot, recording it so subsequent calls in the same poll cycle return
+// false. It lets QueryArrivals (called on every render and page tick) emit
+// rescue diagnostics at most once per poll without spamming the log.
+func (ls *LiveStore) DiagLogOnce(key string) bool {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ls.diagLogged[key] {
+		return false
+	}
+	ls.diagLogged[key] = true
+	return true
 }
 
 // FeedTime returns the feed header timestamp from the last successful parse.
@@ -268,20 +292,29 @@ func (p *Poller) parse(data []byte) error {
 		case tripAdded:
 			// Handle added trips: we need an arrival time for each stop.
 			routeID := tu.GetTrip().GetRouteId()
+			// Resolve route short name from our static data once per trip.
+			routeShort, routeResolved := routeShortName(db, routeID)
 			for _, stu := range tu.StopTimeUpdate {
-				if stu.GetArrival().GetTime() == 0 {
+				// Prefer the arrival time, but fall back to the departure time:
+				// added stops sometimes carry only a departure event, and
+				// dropping them would hide the very replacement services that
+				// appear during disruptions.
+				arrTS := stu.GetArrival().GetTime()
+				if arrTS == 0 {
+					arrTS = stu.GetDeparture().GetTime()
+				}
+				if arrTS == 0 {
 					continue
 				}
 				stopNumber := resolveStopID(db, stu.GetStopId())
 				if stopNumber == "" {
 					continue
 				}
-				// Resolve route short name from our static data.
-				routeShort := routeShortName(db, routeID)
 				arr := Addition{
 					RouteShortName: routeShort,
-					ArrivalTime:    time.Unix(stu.GetArrival().GetTime(), 0),
+					ArrivalTime:    time.Unix(arrTS, 0),
 					FeedTimestamp:  feedTS,
+					RouteResolved:  routeResolved,
 				}
 				// Deduplicate: remove old entries for the same route at this stop.
 				existing := newAdds[stopNumber]
@@ -342,6 +375,9 @@ func (p *Poller) parse(data []byte) error {
 	p.store.Cancellations = newCancels
 	p.store.Additions = newAdds
 	p.store.LastFeedTime = feedTime
+	// Fresh feed: clear the rescue-log dedupe so anomalies in this cycle are
+	// reported once.
+	p.store.diagLogged = make(map[string]bool)
 	p.store.mu.Unlock()
 
 	slog.Debug("realtime parsed",
@@ -359,15 +395,23 @@ func resolveStopID(db *StaticDB, stopID string) string {
 	if _, ok := db.StopNames[stopID]; ok {
 		return stopID
 	}
-	// Check if any of our stops have this as their ID (heuristic: TFI uses numeric IDs).
+	// Otherwise the feed used the raw GTFS stop_id; map it back to the
+	// stop_number we key everything else by (notably for rail, where the two
+	// differ). The map only covers our configured stops.
+	if num, ok := db.StopIDToNumber[stopID]; ok {
+		return num
+	}
 	// As a fallback, return the stopID itself and let the caller filter.
 	return stopID
 }
 
-// routeShortName returns the short name for a route_id from the static data.
-func routeShortName(db *StaticDB, routeID string) string {
+// routeShortName returns the short name for a route_id from the static data and
+// whether it was found. When not found it returns the raw routeID and false so
+// callers can tell an unresolved (e.g. brand-new disruption) route apart from a
+// genuine short name.
+func routeShortName(db *StaticDB, routeID string) (string, bool) {
 	if name, ok := db.RouteShortNames[routeID]; ok {
-		return name
+		return name, true
 	}
-	return routeID
+	return routeID, false
 }
