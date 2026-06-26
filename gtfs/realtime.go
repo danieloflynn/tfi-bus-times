@@ -382,14 +382,15 @@ func (p *Poller) parse(data []byte) error {
 		if tuBytes == nil {
 			continue
 		}
-		// Cheap pre-read of trip_id + schedule_relationship from the trip
-		// descriptor, without decoding the stop_time_update tree.
-		tripID := ""
+		// Cheap pre-read of trip_id (as raw bytes) + schedule_relationship from
+		// the trip descriptor, without decoding the stop_time_update tree. We keep
+		// trip_id as bytes and only convert to a string where one must be stored,
+		// so the ~2,700 irrelevant entities cost no string allocation (the
+		// db.Trips[string(idb)] check below is the compiler's no-alloc map lookup).
+		var idb []byte
 		rel := 0
 		if trip := wireFindBytes(tuBytes, tuTripField); trip != nil {
-			if idb := wireFindBytes(trip, tdTripIDField); idb != nil {
-				tripID = string(idb)
-			}
+			idb = wireFindBytes(trip, tdTripIDField)
 			if r, ok := wireFindVarint(trip, tdRelField); ok {
 				rel = int(r)
 			}
@@ -398,7 +399,7 @@ func (p *Poller) parse(data []byte) error {
 		switch rel {
 		case tripCancelled:
 			// Cancellation needs only the trip_id — never decode its stops.
-			newCancels[tripID] = feedTime
+			newCancels[string(idb)] = feedTime
 			nCancelled++
 			continue
 		case tripAdded:
@@ -448,7 +449,9 @@ func (p *Poller) parse(data []byte) error {
 		}
 
 		// Scheduled trip: only fully decode it if it serves one of our stops.
-		if _, ok := db.Trips[tripID]; !ok {
+		// db.Trips[string(idb)] is the no-alloc map lookup; we materialise the
+		// trip_id string only once we know we will store delays under it.
+		if _, ok := db.Trips[string(idb)]; !ok {
 			nUnknown++
 			continue
 		}
@@ -485,7 +488,7 @@ func (p *Poller) parse(data []byte) error {
 			sort.Slice(delays, func(i, j int) bool {
 				return delays[i].StopSequence < delays[j].StopSequence
 			})
-			newDelays[tripID] = delays
+			newDelays[string(idb)] = delays
 		}
 	}
 

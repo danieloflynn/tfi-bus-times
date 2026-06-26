@@ -10,4 +10,5 @@ BuildFromZIPFile 2.58 ms / 1.11 MB · RenderHD 2.22 ms / 615 KB · QueryArrivals
 
 | # | Change | Benchmark effect | Commit |
 | --- | --- | --- | --- |
-| 001 | `parse`: wire-level pre-filter — only fully decode the trip-updates serving our stops (+ added/cancelled), not all ~2,900 | `PollerParse` time −76.5% (12.0→2.8 ms), memory −79.3% (7.41→1.53 MB), allocs −84.9% (210k→31.7k) | _next_ |
+| 001 | `parse`: wire-level pre-filter — only fully decode the trip-updates serving our stops (+ added/cancelled), not all ~2,900 | `PollerParse` time −76.5% (12.0→2.8 ms), memory −79.3% (7.41→1.53 MB), allocs −84.9% (210k→31.7k) | 58159ac |
+| 002 | `parse`: keep `trip_id` as bytes; no-alloc `db.Trips[string(idb)]` lookup, materialise the string only when stored | `PollerParse` allocs −8.1% (31.7k→29.1k), time −3.3%, mem −2.6% | _next_ |
