@@ -3,18 +3,24 @@ PI_CONFIG_DIR ?= /etc/tfi-display
 BINARY := build/tfi-display
 AGENT_BINARY := build/tfi-agent
 
+# Build version shown in the top-left of the board. "v" + the git commit count
+# so it auto-increments on every release; falls back to "dev" outside a git
+# checkout. Injected into display.Version via the linker (see display/version.go).
+VERSION ?= v$(shell git rev-list --count HEAD 2>/dev/null || echo dev)
+VERSION_LDFLAGS := -X tfi-display/display.Version=$(VERSION)
+
 .PHONY: build build-pi build-agent-pi deploy deploy-agent test clean preview run-mock
 
 # Build for the current host (useful for -mock runs on a laptop).
 build:
-	go build -o $(BINARY) .
+	go build -ldflags="$(VERSION_LDFLAGS)" -o $(BINARY) .
 
 # Cross-compile for Raspberry Pi Zero 2W (ARM64 Linux).
 build-pi: export GOOS=linux
 build-pi: export GOARCH=arm64
 build-pi: export CGO_ENABLED=0
 build-pi:
-	go build -ldflags="-s -w" -o $(BINARY)-linux-arm64 .
+	go build -ldflags="-s -w $(VERSION_LDFLAGS)" -o $(BINARY)-linux-arm64 .
 
 # Run unit tests (no hardware required).
 test:

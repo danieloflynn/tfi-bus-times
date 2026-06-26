@@ -64,8 +64,11 @@ func renderHD(sections []StopSection, now, feedTime time.Time, width, height int
 	img := image.NewGray(image.Rect(0, 0, width, height))
 	// Background is black.
 
-	// Top header: timestamp.
+	// Top header: build version on the left, timestamp on the right.
 	headerBaseline := (hdHeaderHeight + fonts.HeaderFace.Metrics().Ascent.Ceil()) / 2
+	if Version != "" {
+		hdDrawText(img, Version, 4, headerBaseline, white, fonts.HeaderFace)
+	}
 	updated := "Updated: " + feedTime.Format("15:04:05")
 	hdDrawTextRight(img, updated, width-4, headerBaseline, white, fonts.HeaderFace)
 
