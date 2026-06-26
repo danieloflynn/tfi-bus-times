@@ -85,6 +85,8 @@ Downloaded binaries are staged to a **dedicated directory** (`/var/lib/tfi-agent
 
 **One-shot diagnostic logging** — `QueryArrivals` runs on every render and page tick (seconds apart), so unconditional rescue logs would spam. `LiveStore.DiagLogOnce(key)` returns true only the first time a key is seen for the current feed snapshot; the dedupe map is reset in `parse`'s atomic swap, so each anomaly is logged at most once per poll cycle. These INFO logs are the built-in confirmation of *which* mechanism (severe delay vs added trip) is rescuing a service.
 
+**Board version display** — the HD renderer draws a build version in the top-left of the header, opposite the right-aligned timestamp, so you can confirm at a glance which release is live on the board. The string lives in `display.Version` (`display/version.go`), defaulting to `"dev"`, and is injected at build time via the linker: `-X tfi-display/display.Version=v<n>`. The Makefile (`build`, `build-pi`) and the release workflow set `<n>` to `git rev-list --count HEAD` (the commit count) so it auto-increments on every release with no manual bump. The release workflow checks out with `fetch-depth: 0` so the count is accurate (shallow clones would report 1). Only the HD path renders it; the legacy small/e-ink header is already full (STOP label left, Updated right).
+
 **Non-obvious code must have comments** — whenever a piece of code does something that isn't immediately clear from reading it (e.g. the 12-hour overnight rule, BOM stripping in CSV headers, backoff logic), add an inline comment explaining _why_, not just _what_. Also update this file to document any new patterns introduced.
 
 ---
