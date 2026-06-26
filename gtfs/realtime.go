@@ -50,6 +50,11 @@ type LiveStore struct {
 	// most once per poll cycle instead of on every render/page tick. It is reset
 	// each time a fresh feed is parsed.
 	diagLogged map[string]bool
+	// now is the clock used for the 24h cancellation window and poll timestamps.
+	// Defaults to time.Now; tests substitute a fixed clock so time-dependent
+	// branches are deterministic. Set once before use — never reassigned while
+	// other goroutines read it.
+	now func() time.Time
 }
 
 // NewLiveStore returns an initialised LiveStore.
@@ -59,6 +64,7 @@ func NewLiveStore() *LiveStore {
 		Cancellations: make(map[string]time.Time),
 		Additions:     make(map[string][]Addition),
 		diagLogged:    make(map[string]bool),
+		now:           time.Now,
 	}
 }
 
@@ -129,7 +135,7 @@ func (ls *LiveStore) IsCancelled(tripID string) bool {
 	if !ok {
 		return false
 	}
-	if time.Since(t) >= 24*time.Hour {
+	if ls.now().Sub(t) >= 24*time.Hour {
 		return false
 	}
 	return true
@@ -183,7 +189,7 @@ func (p *Poller) Poll() int {
 		slog.Error("parsing realtime feed", "err", err)
 	} else {
 		p.store.mu.Lock()
-		p.store.LastPollTime = time.Now()
+		p.store.LastPollTime = p.store.now()
 		p.store.mu.Unlock()
 	}
 	return 0
@@ -268,7 +274,7 @@ func (p *Poller) parse(data []byte) error {
 	// Preserve old cancellations that are still within 24h.
 	p.store.mu.RLock()
 	for id, t := range p.store.Cancellations {
-		if time.Since(t) < 24*time.Hour {
+		if p.store.now().Sub(t) < 24*time.Hour {
 			newCancels[id] = t
 		}
 	}
