@@ -273,19 +273,8 @@ func renderAndDisplay(
 	for i, s := range cfg.Stops {
 		arr := gtfs.QueryArrivals(db, live, s.StopNumber, now, cfg.MaxMinutes, s.WalkingMinutes, routeFilter)
 		totalArrivals += len(arr)
-		if len(arr) > 0 && pageSize > 0 {
-			numPages := (len(arr) + pageSize - 1) / pageSize
-			if cfg.MaxPages > 0 && numPages > cfg.MaxPages {
-				numPages = cfg.MaxPages
-			}
-			p := page % numPages
-			start := p * pageSize
-			end := start + pageSize
-			if end > len(arr) {
-				end = len(arr)
-			}
-			arr = arr[start:end]
-		}
+		start, end := pageWindow(len(arr), pageSize, cfg.MaxPages, page)
+		arr = arr[start:end]
 		sections[i] = display.StopSection{Label: s.Label, Arrivals: arr}
 	}
 
@@ -295,4 +284,29 @@ func renderAndDisplay(
 	} else {
 		slog.Info("display updated", "arrivals", totalArrivals, "time", now.Format("15:04:05"))
 	}
+}
+
+// pageWindow returns the [start, end) bounds of the arrival slice to show for the
+// given page of one section. total is the section's arrival count, pageSize the
+// number of rows that fit, maxPages an optional cap on cycling (0 = unlimited),
+// and page the monotonically increasing tick counter (wrapped per section).
+//
+// It is the pure core of renderAndDisplay's paging so the wrap-around arithmetic
+// can be unit-tested. When pageSize <= 0 or total == 0 it returns the full range,
+// so the caller can slice unconditionally without changing behaviour.
+func pageWindow(total, pageSize, maxPages, page int) (start, end int) {
+	if total <= 0 || pageSize <= 0 {
+		return 0, total
+	}
+	numPages := (total + pageSize - 1) / pageSize
+	if maxPages > 0 && numPages > maxPages {
+		numPages = maxPages
+	}
+	p := page % numPages
+	start = p * pageSize
+	end = start + pageSize
+	if end > total {
+		end = total
+	}
+	return start, end
 }
