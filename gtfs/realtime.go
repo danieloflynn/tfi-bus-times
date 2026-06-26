@@ -10,9 +10,7 @@ import (
 	"sync"
 	"time"
 
-	gtfsrt "github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs"
 	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
 )
 
 // StopDelay holds realtime delay data for one stop within a trip.
@@ -253,14 +251,64 @@ const (
 // GTFS-realtime protobuf field numbers (fixed by the spec). parse uses these to
 // read a trip's identity off the wire without fully decoding every trip-update.
 const (
-	fmHeaderField     = 1 // FeedMessage.header
-	fmEntityField     = 2 // FeedMessage.entity
-	fhTimestampField  = 3 // FeedHeader.timestamp
-	feTripUpdateField = 3 // FeedEntity.trip_update
-	tuTripField       = 1 // TripUpdate.trip
-	tdTripIDField     = 1 // TripDescriptor.trip_id
-	tdRelField        = 4 // TripDescriptor.schedule_relationship
+	fmHeaderField         = 1 // FeedMessage.header
+	fmEntityField         = 2 // FeedMessage.entity
+	fhTimestampField      = 3 // FeedHeader.timestamp
+	feTripUpdateField     = 3 // FeedEntity.trip_update
+	tuTripField           = 1 // TripUpdate.trip
+	tuStopTimeUpdateField = 2 // TripUpdate.stop_time_update (repeated)
+	tdTripIDField         = 1 // TripDescriptor.trip_id
+	tdRelField            = 4 // TripDescriptor.schedule_relationship
+	tdRouteIDField        = 5 // TripDescriptor.route_id
+	stuStopSeqField       = 1 // StopTimeUpdate.stop_sequence
+	stuArrivalField       = 2 // StopTimeUpdate.arrival
+	stuDepartureField     = 3 // StopTimeUpdate.departure
+	stuStopIDField        = 4 // StopTimeUpdate.stop_id
+	stuRelField           = 5 // StopTimeUpdate.schedule_relationship
+	steDelayField         = 1 // StopTimeEvent.delay
+	steTimeField          = 2 // StopTimeEvent.time
 )
+
+// wireForEachBytes invokes fn for each length-delimited field `field` in msg, in
+// wire order. Returns false if the message is malformed.
+func wireForEachBytes(msg []byte, field protowire.Number, fn func([]byte)) bool {
+	b := msg
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return false
+		}
+		b = b[n:]
+		if num == field && typ == protowire.BytesType {
+			v, m := protowire.ConsumeBytes(b)
+			if m < 0 {
+				return false
+			}
+			fn(v)
+			b = b[m:]
+			continue
+		}
+		m := protowire.ConsumeFieldValue(num, typ, b)
+		if m < 0 {
+			return false
+		}
+		b = b[m:]
+	}
+	return true
+}
+
+// wireEventTime returns the StopTimeEvent.time (field 2) of the event submessage
+// at field `event` within a StopTimeUpdate, or 0 if absent.
+func wireEventTime(stu []byte, event protowire.Number) int64 {
+	ev := wireFindBytes(stu, event)
+	if ev == nil {
+		return 0
+	}
+	if t, ok := wireFindVarint(ev, steTimeField); ok {
+		return int64(t)
+	}
+	return 0
+}
 
 // wireFindBytes returns the contents of the first length-delimited field `field`
 // in the protobuf message bytes msg, or nil if absent or malformed. It is used to
@@ -387,9 +435,10 @@ func (p *Poller) parse(data []byte) error {
 		// trip_id as bytes and only convert to a string where one must be stored,
 		// so the ~2,700 irrelevant entities cost no string allocation (the
 		// db.Trips[string(idb)] check below is the compiler's no-alloc map lookup).
+		trip := wireFindBytes(tuBytes, tuTripField)
 		var idb []byte
 		rel := 0
-		if trip := wireFindBytes(tuBytes, tuTripField); trip != nil {
+		if trip != nil {
 			idb = wireFindBytes(trip, tdTripIDField)
 			if r, ok := wireFindVarint(trip, tdRelField); ok {
 				rel = int(r)
@@ -403,29 +452,24 @@ func (p *Poller) parse(data []byte) error {
 			nCancelled++
 			continue
 		case tripAdded:
-			tu := &gtfsrt.TripUpdate{}
-			if err := proto.Unmarshal(tuBytes, tu); err != nil {
-				return fmt.Errorf("unmarshal trip_update: %w", err)
-			}
-			// Handle added trips: we need an arrival time for each stop.
-			routeID := tu.GetTrip().GetRouteId()
-			// Resolve route short name from our static data once per trip.
-			routeShort, routeResolved := routeShortName(db, routeID)
-			for _, stu := range tu.StopTimeUpdate {
+			// Handle added trips: we need an arrival time for each stop. Resolve
+			// the route short name once from our static data.
+			routeShort, routeResolved := routeShortName(db, string(wireFindBytes(trip, tdRouteIDField)))
+			wireForEachBytes(tuBytes, tuStopTimeUpdateField, func(stu []byte) {
 				// Prefer the arrival time, but fall back to the departure time:
 				// added stops sometimes carry only a departure event, and
 				// dropping them would hide the very replacement services that
 				// appear during disruptions.
-				arrTS := stu.GetArrival().GetTime()
+				arrTS := wireEventTime(stu, stuArrivalField)
 				if arrTS == 0 {
-					arrTS = stu.GetDeparture().GetTime()
+					arrTS = wireEventTime(stu, stuDepartureField)
 				}
 				if arrTS == 0 {
-					continue
+					return
 				}
-				stopNumber := resolveStopID(db, stu.GetStopId())
+				stopNumber := resolveStopID(db, string(wireFindBytes(stu, stuStopIDField)))
 				if stopNumber == "" {
-					continue
+					return
 				}
 				arr := Addition{
 					RouteShortName: routeShort,
@@ -444,44 +488,46 @@ func (p *Poller) parse(data []byte) error {
 				}
 				newAdds[stopNumber] = append(deduped, arr)
 				nAdded++
-			}
+			})
 			continue
 		}
 
-		// Scheduled trip: only fully decode it if it serves one of our stops.
+		// Scheduled trip: only process it if it serves one of our stops.
 		// db.Trips[string(idb)] is the no-alloc map lookup; we materialise the
 		// trip_id string only once we know we will store delays under it.
 		if _, ok := db.Trips[string(idb)]; !ok {
 			nUnknown++
 			continue
 		}
-		tu := &gtfsrt.TripUpdate{}
-		if err := proto.Unmarshal(tuBytes, tu); err != nil {
-			return fmt.Errorf("unmarshal trip_update: %w", err)
-		}
 
 		var delays []StopDelay
-		for _, stu := range tu.StopTimeUpdate {
-			if int(stu.GetScheduleRelationship()) == stopSkipped {
-				continue
+		wireForEachBytes(tuBytes, tuStopTimeUpdateField, func(stu []byte) {
+			if r, ok := wireFindVarint(stu, stuRelField); ok && int(r) == stopSkipped {
+				return
 			}
 
 			var sd StopDelay
-			sd.StopSequence = int32(stu.GetStopSequence())
+			if seq, ok := wireFindVarint(stu, stuStopSeqField); ok {
+				sd.StopSequence = int32(seq)
+			}
 
-			arr := stu.GetArrival()
-			if arr.GetTime() != 0 {
-				sd.AbsTime = arr.GetTime()
-			} else {
-				d := arr.GetDelay()
-				if d > maxDelaySeconds || d < -maxDelaySeconds {
-					continue // discard implausible delays
+			// Arrival event: an absolute time wins; otherwise a bounded delta delay.
+			// A stop with no arrival event keeps AbsTime=0/DelaySeconds=0 (matches
+			// the old GetArrival().GetTime()/GetDelay() nil behaviour).
+			if arr := wireFindBytes(stu, stuArrivalField); arr != nil {
+				if t, ok := wireFindVarint(arr, steTimeField); ok && int64(t) != 0 {
+					sd.AbsTime = int64(t)
+				} else if d, ok := wireFindVarint(arr, steDelayField); ok {
+					dd := int32(d)
+					if dd > maxDelaySeconds || dd < -maxDelaySeconds {
+						return // discard implausible delays
+					}
+					sd.DelaySeconds = dd
 				}
-				sd.DelaySeconds = d
 			}
 			delays = append(delays, sd)
 			nUpdates++
-		}
+		})
 
 		if len(delays) > 0 {
 			// Sort by StopSequence for binary search later.
