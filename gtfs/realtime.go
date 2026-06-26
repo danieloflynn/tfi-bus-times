@@ -11,6 +11,7 @@ import (
 	"time"
 
 	gtfsrt "github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -249,20 +250,85 @@ const (
 	maxDelaySeconds = 604800 // one week
 )
 
+// GTFS-realtime protobuf field numbers (fixed by the spec). parse uses these to
+// read a trip's identity off the wire without fully decoding every trip-update.
+const (
+	fmHeaderField     = 1 // FeedMessage.header
+	fmEntityField     = 2 // FeedMessage.entity
+	fhTimestampField  = 3 // FeedHeader.timestamp
+	feTripUpdateField = 3 // FeedEntity.trip_update
+	tuTripField       = 1 // TripUpdate.trip
+	tdTripIDField     = 1 // TripDescriptor.trip_id
+	tdRelField        = 4 // TripDescriptor.schedule_relationship
+)
+
+// wireFindBytes returns the contents of the first length-delimited field `field`
+// in the protobuf message bytes msg, or nil if absent or malformed. It is used to
+// descend into submessages (entity → trip_update → trip) without allocating the
+// decoded message tree.
+func wireFindBytes(msg []byte, field protowire.Number) []byte {
+	b := msg
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return nil
+		}
+		b = b[n:]
+		if num == field && typ == protowire.BytesType {
+			v, m := protowire.ConsumeBytes(b)
+			if m < 0 {
+				return nil
+			}
+			return v
+		}
+		m := protowire.ConsumeFieldValue(num, typ, b)
+		if m < 0 {
+			return nil
+		}
+		b = b[m:]
+	}
+	return nil
+}
+
+// wireFindVarint returns the value of the first varint field `field` in msg and
+// whether it was present.
+func wireFindVarint(msg []byte, field protowire.Number) (uint64, bool) {
+	b := msg
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return 0, false
+		}
+		b = b[n:]
+		if num == field && typ == protowire.VarintType {
+			v, m := protowire.ConsumeVarint(b)
+			if m < 0 {
+				return 0, false
+			}
+			return v, true
+		}
+		m := protowire.ConsumeFieldValue(num, typ, b)
+		if m < 0 {
+			return 0, false
+		}
+		b = b[m:]
+	}
+	return 0, false
+}
+
 // parse unmarshals a GTFS-RT protobuf and updates the LiveStore.
 func (p *Poller) parse(data []byte) error {
-	feed := &gtfsrt.FeedMessage{}
-	if err := proto.Unmarshal(data, feed); err != nil {
-		return fmt.Errorf("unmarshal: %w", err)
-	}
-
 	// Snapshot the static dataset once for the whole parse so a mid-parse
 	// background refresh can't make trip lookups inconsistent.
 	db := p.db.Load()
 
+	// Read the feed header timestamp first. Protobuf does not guarantee field
+	// order, so resolve it before stamping cancellations/additions with it.
 	feedTS := int64(0)
-	if feed.Header != nil {
-		feedTS = int64(feed.Header.GetTimestamp())
+	if hdr := wireFindBytes(data, fmHeaderField); hdr != nil {
+		if ts, ok := wireFindVarint(hdr, fhTimestampField); ok {
+			feedTS = int64(ts)
+		}
 	}
 	feedTime := time.Unix(feedTS, 0)
 
@@ -282,20 +348,64 @@ func (p *Poller) parse(data []byte) error {
 
 	nUpdates, nAdded, nCancelled, nUnknown := 0, 0, 0, 0
 
-	for _, entity := range feed.Entity {
-		tu := entity.GetTripUpdate()
-		if tu == nil {
+	// Walk the entities at the wire level. The feed is a FULL_DATASET of every
+	// trip in the network (~2,900), but only the few serving our stops (plus
+	// added/cancelled trips) matter. We read each entity's trip_id +
+	// schedule_relationship straight from the bytes and run the allocation-heavy
+	// proto.Unmarshal only on the trip-updates we actually use — turning a
+	// ~2,900-message decode into a ~200-message one. See
+	// planning/optimizations/001-parse-wire-prefilter.md.
+	b := data
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return fmt.Errorf("unmarshal: %w", protowire.ParseError(n))
+		}
+		b = b[n:]
+		if num != fmEntityField || typ != protowire.BytesType {
+			m := protowire.ConsumeFieldValue(num, typ, b)
+			if m < 0 {
+				return fmt.Errorf("unmarshal: %w", protowire.ParseError(m))
+			}
+			b = b[m:]
 			continue
 		}
-		tripID := tu.GetTrip().GetTripId()
-		rel := int(tu.GetTrip().GetScheduleRelationship())
+		ent, m := protowire.ConsumeBytes(b)
+		if m < 0 {
+			return fmt.Errorf("unmarshal: %w", protowire.ParseError(m))
+		}
+		b = b[m:]
+
+		// Only trip-update entities carry a trip_update submessage; vehicle and
+		// alert entities don't, and are ignored (matches the old tu == nil skip).
+		tuBytes := wireFindBytes(ent, feTripUpdateField)
+		if tuBytes == nil {
+			continue
+		}
+		// Cheap pre-read of trip_id + schedule_relationship from the trip
+		// descriptor, without decoding the stop_time_update tree.
+		tripID := ""
+		rel := 0
+		if trip := wireFindBytes(tuBytes, tuTripField); trip != nil {
+			if idb := wireFindBytes(trip, tdTripIDField); idb != nil {
+				tripID = string(idb)
+			}
+			if r, ok := wireFindVarint(trip, tdRelField); ok {
+				rel = int(r)
+			}
+		}
 
 		switch rel {
 		case tripCancelled:
+			// Cancellation needs only the trip_id — never decode its stops.
 			newCancels[tripID] = feedTime
 			nCancelled++
 			continue
 		case tripAdded:
+			tu := &gtfsrt.TripUpdate{}
+			if err := proto.Unmarshal(tuBytes, tu); err != nil {
+				return fmt.Errorf("unmarshal trip_update: %w", err)
+			}
 			// Handle added trips: we need an arrival time for each stop.
 			routeID := tu.GetTrip().GetRouteId()
 			// Resolve route short name from our static data once per trip.
@@ -337,10 +447,14 @@ func (p *Poller) parse(data []byte) error {
 			continue
 		}
 
-		// Scheduled trip.
+		// Scheduled trip: only fully decode it if it serves one of our stops.
 		if _, ok := db.Trips[tripID]; !ok {
 			nUnknown++
 			continue
+		}
+		tu := &gtfsrt.TripUpdate{}
+		if err := proto.Unmarshal(tuBytes, tu); err != nil {
+			return fmt.Errorf("unmarshal trip_update: %w", err)
 		}
 
 		var delays []StopDelay
