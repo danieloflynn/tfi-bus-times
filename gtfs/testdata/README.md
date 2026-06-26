@@ -35,9 +35,29 @@ fixtures, so a captured delay/ETA maps to a fixed minutes-until value.
 
 ## Files
 
-- `tripupdates.gtfsr` — raw canonical realtime capture (preserved verbatim).
-- Trimmed / synthetic variants are derived from this + the static ZIP via
-  `tools/` and documented alongside as they are added.
+- `tripupdates.gtfsr` — raw canonical realtime capture (preserved verbatim, 776 KB).
+- `gtfs_static.zip` — the full TFI GTFS static feed (Last-Modified 2026-06-25)
+  trimmed to the three configured stops via `tools/maketestdata`. 33 KB; 3 stops,
+  1285 trips, 9 routes, 16 services. Reproduces the same trip set as the full feed,
+  so `buildFromZIPFile` and the golden pipeline can run against a committable file.
+
+## Realtime coverage at the configured stops (from cross-referencing the two captures)
+
+Against stops 478 / 2808 / 999126 at the canonical instant, the captured feed
+carries: **73 scheduled trips with live delays, 2 cancellations, 0 added trips.**
+
+Consequence for tests:
+
+- **Delays + cancellations** are asserted against the *real* captured feed (golden
+  end-to-end test).
+- **Added trips** do not appear at our stops in this capture, so addition handling
+  is tested with *synthetic* in-code GTFS-RT feeds (see the `TestProtoUnmarshal`
+  pattern in `realtime_test.go`) — build a feed, marshal it, parse it.
+- Other parse edge cases (skipped stops, implausible delays, absolute-time vs
+  delta, departure-time fallback, unknown trips, empty/nil header) are likewise
+  built synthetically in-code rather than carved out of the big capture.
+
+The raw `tripupdates.gtfsr` is also the realistic input for benchmarks.
 
 ## Regenerating derived fixtures
 
