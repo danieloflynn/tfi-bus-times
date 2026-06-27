@@ -199,7 +199,7 @@ Poller-owned `bytes.Buffer` that is `Reset()` each poll so the backing array is
 recycled. parse copies out only the strings it stores, so reusing the raw bytes
 between polls is safe.
 
-### 14. ⬜ static build: kill per-row allocations in stop_times parsing
+### 14. ✅ static build: kill per-row allocations in stop_times parsing
 `parseGTFSTime` uses `strings.Split` (slice alloc) on every stop_times row — the
 biggest file. Replace with an allocation-free manual `HH:MM:SS` parser. Also
 hoist the `dayNames` slice out of the calendar row callback and build the
@@ -214,6 +214,20 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 14 — allocation-free stop_times parsing in the static build (KEPT)
+Replaced `parseGTFSTime`'s `strings.Split` (a `[]string` alloc on every
+stop_times row — the largest GTFS file) with index-based field slicing; hoisted
+the per-row `dayNames` slice to a package-level `gtfsDayNames`; and built the
+calendar_dates exception key via `appendYYYYMMDD` instead of `time.Format`.
+
+| Benchmark        | ns/op (b→a)         | B/op (b→a)          | allocs (b→a)  |
+| ---------------- | ------------------- | ------------------- | ------------- |
+| BuildFromZIPFile | 2,396,450 → 2,365,000 | 1,101,110 → 1,039,227 | 4,583 → 3,285 |
+
+~1285 allocs saved = one per stop_times row. Runs at startup and on each daily
+static refresh (where it competes with the render loop). 99k fuzz execs of
+parseGTFSTime clean; all error/overnight edge-case unit tests pass.
 
 ### Idea 13 — reuse the fetch read buffer across polls (KEPT)
 `io.ReadAll(resp.Body)` allocated a fresh, doubling-growth buffer every poll

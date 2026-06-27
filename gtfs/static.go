@@ -18,6 +18,10 @@ import (
 
 const schemaVer = 3
 
+// gtfsDayNames is the calendar.txt weekday column order (GTFS Monday-first).
+// Package-level so the calendar row callback doesn't allocate it per row.
+var gtfsDayNames = [7]string{"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+
 // StopTime represents one scheduled visit of a trip to a stop.
 type StopTime struct {
 	TripID       string
@@ -278,9 +282,8 @@ func buildFromZIPFile(path string, zipTime time.Time, filterStops []string) (*St
 		if err != nil {
 			return err
 		}
-		dayNames := []string{"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
 		var days [7]bool
-		for i, d := range dayNames {
+		for i, d := range gtfsDayNames {
 			days[i] = row[header[d]] == "1"
 		}
 		db.Services[serviceID] = Service{StartDate: start, EndDate: end, Days: days}
@@ -297,8 +300,15 @@ func buildFromZIPFile(path string, zipTime time.Time, filterStops []string) (*St
 			return err
 		}
 		exType, _ := strconv.Atoi(row[header["exception_type"]])
-		key := serviceID + ":" + date.Format("20060102")
-		db.Exceptions[key] = exType
+		// Build "serviceID:YYYYMMDD" without time.Format (allocation-free append
+		// into a stack buffer); one string alloc for the stored map key remains.
+		// Matches the exact key IsServiceActive reconstructs on the query path.
+		var keyBuf [32]byte
+		kb := append(keyBuf[:0], serviceID...)
+		kb = append(kb, ':')
+		y, mo, dd := date.Date()
+		kb = appendYYYYMMDD(kb, y, int(mo), dd)
+		db.Exceptions[string(kb)] = exType
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("parsing calendar_dates.txt: %w", err)
@@ -443,20 +453,30 @@ func parseGTFSDate(s string) (time.Time, error) {
 }
 
 // parseGTFSTime parses "HH:MM:SS" (hours may exceed 23 for overnight trips).
+// It locates the two colons by index and parses the three fields from string
+// sub-slices rather than strings.Split, which allocated a []string on every
+// stop_times row — the largest GTFS file (the dominant build allocation source).
 func parseGTFSTime(s string) (int, error) {
-	parts := strings.Split(s, ":")
-	if len(parts) != 3 {
+	c1 := strings.IndexByte(s, ':')
+	if c1 < 0 {
 		return 0, fmt.Errorf("invalid time: %q", s)
 	}
-	h, err := strconv.Atoi(parts[0])
+	c2 := strings.IndexByte(s[c1+1:], ':')
+	if c2 < 0 {
+		return 0, fmt.Errorf("invalid time: %q", s)
+	}
+	c2 += c1 + 1 // make c2 an index into s
+	h, err := strconv.Atoi(s[:c1])
 	if err != nil {
 		return 0, err
 	}
-	m, err := strconv.Atoi(parts[1])
+	m, err := strconv.Atoi(s[c1+1 : c2])
 	if err != nil {
 		return 0, err
 	}
-	ss, err := strconv.Atoi(parts[2])
+	// A third colon (e.g. "10:00:00:00") leaves a non-numeric seconds field, so
+	// Atoi rejects it — matching the old len(parts)==3 check.
+	ss, err := strconv.Atoi(s[c2+1:])
 	if err != nil {
 		return 0, err
 	}
