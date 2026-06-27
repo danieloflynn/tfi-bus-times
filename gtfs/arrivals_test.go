@@ -393,6 +393,33 @@ func TestQueryArrivalsAddedUnresolvedRouteBypassesFilter(t *testing.T) {
 	}
 }
 
+// TestQueryArrivalsIntoZeroAllocWithAdditions locks the steady-state
+// allocation-free contract of the render hot path: with a reused scratch slice
+// and a watched stop that has an addition (whose once-per-poll diagnostic would
+// otherwise allocate a formatted key every call), QueryArrivalsInto must do zero
+// heap allocations after the first (warm-up) call.
+func TestQueryArrivalsIntoZeroAllocWithAdditions(t *testing.T) {
+	db := makeTestDB()
+	ls := NewLiveStore()
+	now := time.Date(2023, 9, 15, 9, 10, 0, 0, time.UTC)
+	withClock(ls, now)
+	ls.Additions["1358"] = []Addition{
+		{RouteShortName: "99", ArrivalTime: now.Add(20 * time.Minute), RouteResolved: true},
+	}
+
+	var scratch []Arrival
+	// Warm-up: first call logs the addition (allocates the key on insert) and
+	// grows the scratch to steady-state capacity.
+	scratch = QueryArrivalsInto(scratch, db, ls, "1358", now, 60, 0, nil)
+
+	got := testing.AllocsPerRun(50, func() {
+		scratch = QueryArrivalsInto(scratch, db, ls, "1358", now, 60, 0, nil)
+	})
+	if got != 0 {
+		t.Errorf("steady-state QueryArrivalsInto allocated %v objects/run, want 0", got)
+	}
+}
+
 // TestParseGTFSTime verifies overnight time parsing.
 func TestParseGTFSTime(t *testing.T) {
 	cases := []struct {

@@ -276,8 +276,18 @@ func QueryArrivalsInto(
 		}
 		// Diagnostic: confirms an added (unscheduled) service is being shown, and
 		// whether its route had to be shown unfiltered because it couldn't be
-		// resolved against the static feed.
-		if live.DiagLogOnce("add|" + stopNumber + "|" + add.RouteShortName + "|" + add.ArrivalTime.Format("1504")) {
+		// resolved against the static feed. Build the dedupe key in a stack buffer
+		// (no concat, no time.Format) and use the no-copy DiagLogOnceBytes so the
+		// common already-logged path on every render allocates nothing.
+		var keyBuf [96]byte
+		kb := append(keyBuf[:0], "add|"...)
+		kb = append(kb, stopNumber...)
+		kb = append(kb, '|')
+		kb = append(kb, add.RouteShortName...)
+		kb = append(kb, '|')
+		ah, am, _ := add.ArrivalTime.Clock()
+		kb = append(kb, byte('0'+ah/10), byte('0'+ah%10), byte('0'+am/10), byte('0'+am%10))
+		if live.DiagLogOnceBytes(kb) {
 			slog.Info("showing added (unscheduled) arrival",
 				"stop", stopNumber, "route", add.RouteShortName,
 				"route_resolved", add.RouteResolved,

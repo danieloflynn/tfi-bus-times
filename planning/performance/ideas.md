@@ -193,6 +193,15 @@ Now caller-owned (allocated once in main before the loop) and filled in place,
 so the page-tick render allocates nothing for the section list. Small (one slice
 header/frame) but free and on the page-tick cadence.
 
+### 28. ✅ QueryArrivals: zero-alloc additions diagnostic (no-copy DiagLogOnceBytes)
+The additions rescue log built its dedupe key by string concat + `time.Format`
+on every render, even after it had been logged — reintroducing per-render
+allocation whenever a watched stop had additions. Added `DiagLogOnceBytes` (no-copy
+`m[string(b)]` membership test) and build the key in a stack buffer (digits via
+`Clock()`, no Format). The already-logged path now allocates nothing. New
+`AllocsPerRun` test locks QueryArrivalsInto at **0 allocs/run** in steady state
+with additions present.
+
 ### 27. ✅ renderer: allocation-light truncate (no []rune)
 `truncate` allocated a `[]rune` plus two strings on every truncation — and the
 HD renderer truncates headsigns per row, per frame. Rewrote it to walk runes by
@@ -316,6 +325,11 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 28 — zero-alloc additions diagnostic (KEPT)
+`DiagLogOnceBytes` + a stack-buffer key (no concat / no time.Format) make the
+already-logged path allocation-free, so QueryArrivalsInto stays 0 allocs/render
+even when a watched stop has additions. Locked by an AllocsPerRun test.
 
 ### Idea 27 — allocation-light truncate (KEPT)
 Walk runes by byte offset instead of `[]rune(s)`; 3 allocs → 1 per truncated

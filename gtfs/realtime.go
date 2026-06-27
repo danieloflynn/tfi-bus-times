@@ -78,6 +78,22 @@ func (ls *LiveStore) DiagLogOnce(key string) bool {
 	return true
 }
 
+// DiagLogOnceBytes is DiagLogOnce for a key held in a (typically stack-allocated)
+// byte buffer. The membership test uses the compiler's no-copy m[string(b)] form,
+// so the already-logged path — the common case on every render once an anomaly
+// has been seen this poll — allocates nothing. The key string is materialised
+// only on the first insert. This keeps QueryArrivals's per-render path
+// allocation-free even when a watched stop has additions to diagnose.
+func (ls *LiveStore) DiagLogOnceBytes(key []byte) bool {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ls.diagLogged[string(key)] {
+		return false
+	}
+	ls.diagLogged[string(key)] = true
+	return true
+}
+
 // FeedTime returns the feed header timestamp from the last successful parse.
 func (s *LiveStore) FeedTime() time.Time {
 	s.mu.RLock()
