@@ -2,7 +2,7 @@ package gtfs
 
 import (
 	"log/slog"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -46,8 +46,17 @@ func IsServiceActive(db *StaticDB, serviceID string, dt time.Time) bool {
 	// comparisons work regardless of the time-of-day component in dt.
 	date := time.Date(dt.Year(), dt.Month(), dt.Day(), 0, 0, 0, 0, dt.Location())
 
-	key := serviceID + ":" + date.Format("20060102")
-	if ex, ok := db.Exceptions[key]; ok {
+	// Build "serviceID:YYYYMMDD" in a stack buffer and look it up via
+	// m[string(b)] — the compiler elides the []byte→string copy, so this hot
+	// path (run per candidate stop-time on every render) avoids the
+	// time.Format + concatenation allocation that dominated the query's heap.
+	var keyBuf [64]byte
+	kb := keyBuf[:0]
+	kb = append(kb, serviceID...)
+	kb = append(kb, ':')
+	y, mo, d := date.Date()
+	kb = appendYYYYMMDD(kb, y, int(mo), d)
+	if ex, ok := db.Exceptions[string(kb)]; ok {
 		return ex == 1 // 1 = added, 2 = removed
 	}
 	svc, ok := db.Services[serviceID]
@@ -97,9 +106,12 @@ func QueryArrivals(
 	// never applied, and the arrival vanished — exactly what happens during major
 	// disruptions. Scanning a few extra buckets is sub-millisecond.
 	extraHours := maxMinutes/60 + 2
-	var tryHours []int
 	startHour := ((now.Hour()-lookbackHours)%24 + 24) % 24
-	seen := make(map[int]bool)
+	// Hours are 0–23, so a fixed [24] array backs both the dedup set and the
+	// result slice — no map/slice heap allocation on this per-render hot path.
+	var seen [24]bool
+	var hoursArr [24]int
+	tryHours := hoursArr[:0]
 	for i := 0; i <= lookbackHours+extraHours+1; i++ {
 		h := (startHour + i) % 24
 		if !seen[h] {
@@ -232,21 +244,38 @@ func QueryArrivals(
 		})
 	}
 
-	// Deduplicate: same tripID can appear in multiple hour buckets.
-	seen2 := make(map[string]bool)
+	// Deduplicate: same tripID can appear in multiple hour buckets. Key on a
+	// small struct {route, scheduled-unix} instead of a formatted string so the
+	// per-arrival ScheduledTime.String() allocation is avoided.
+	type dedupKey struct {
+		route string
+		unix  int64
+	}
+	seen2 := make(map[dedupKey]bool, len(arrivals))
 	deduped := arrivals[:0]
 	for _, a := range arrivals {
-		key := a.RouteShort + "|" + a.ScheduledTime.String()
+		key := dedupKey{a.RouteShort, a.ScheduledTime.Unix()}
 		if !seen2[key] {
 			seen2[key] = true
 			deduped = append(deduped, a)
 		}
 	}
 
-	sort.Slice(deduped, func(i, j int) bool {
-		return deduped[i].EffectiveTime().Before(deduped[j].EffectiveTime())
+	// slices.SortFunc avoids sort.Slice's reflection + closure-escape overhead.
+	slices.SortFunc(deduped, func(a, b Arrival) int {
+		return a.EffectiveTime().Compare(b.EffectiveTime())
 	})
 	return deduped
+}
+
+// appendYYYYMMDD appends a zero-padded YYYYMMDD date to b, matching
+// time.Format("20060102") without allocating. Used to build exception-map keys
+// on the QueryArrivals hot path.
+func appendYYYYMMDD(b []byte, y, m, d int) []byte {
+	b = append(b, byte('0'+(y/1000)%10), byte('0'+(y/100)%10), byte('0'+(y/10)%10), byte('0'+y%10))
+	b = append(b, byte('0'+(m/10)%10), byte('0'+m%10))
+	b = append(b, byte('0'+(d/10)%10), byte('0'+d%10))
+	return b
 }
 
 // BuildRouteFilter converts a slice of route short names into a lookup map.

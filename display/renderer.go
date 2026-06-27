@@ -49,7 +49,28 @@ const (
 var (
 	black = color.Gray{Y: 0x00}
 	white = color.Gray{Y: 0xFF}
+
+	// Cached, immutable uniform sources for the only two colours the board
+	// draws. font.Drawer needs a Src image; allocating a fresh image.NewUniform
+	// for every DrawString was the bulk of the renderer's per-frame allocations
+	// (a frame is redrawn every page tick). *image.Uniform is read-only, so
+	// sharing one instance per colour is safe across calls and goroutines.
+	srcBlack = image.NewUniform(black)
+	srcWhite = image.NewUniform(white)
 )
+
+// grayUniform returns a cached uniform source for black/white (the only colours
+// used) and falls back to a fresh allocation for any other colour.
+func grayUniform(c color.Gray) *image.Uniform {
+	switch c.Y {
+	case 0x00:
+		return srcBlack
+	case 0xFF:
+		return srcWhite
+	default:
+		return image.NewUniform(c)
+	}
+}
 
 // hdMinWidth is the threshold above which the HD layout is used.
 const hdMinWidth = 800
@@ -58,8 +79,35 @@ const hdMinWidth = 800
 // On small displays (< hdMinWidth) all sections are merged into one sorted list.
 // On HD displays each section gets its own labelled band.
 func Render(sections []StopSection, now, feedTime time.Time, width, height int) *image.Gray {
+	return renderInto(image.NewGray(image.Rect(0, 0, width, height)), sections, now, feedTime, width, height)
+}
+
+// Renderer renders frames while reusing a single backing image buffer across
+// calls, eliminating the per-frame ~600 KB allocation on the device's render
+// loop (a frame is redrawn every page tick). It is not safe for concurrent use;
+// the display loop is single-goroutine. The returned image is overwritten on the
+// next Render call, so callers must finish consuming it first — DisplayFrame
+// copies pixels synchronously, so this holds for the production loop.
+type Renderer struct {
+	buf *image.Gray
+}
+
+// Render draws into the reused buffer, reallocating only when the dimensions
+// change. Otherwise identical to the package-level Render.
+func (r *Renderer) Render(sections []StopSection, now, feedTime time.Time, width, height int) *image.Gray {
+	if r.buf == nil || r.buf.Rect.Dx() != width || r.buf.Rect.Dy() != height {
+		r.buf = image.NewGray(image.Rect(0, 0, width, height))
+	}
+	// Background reset is handled per-path (renderHD clears to black; the small
+	// path fills white), so the reused buffer needs no clearing here.
+	return renderInto(r.buf, sections, now, feedTime, width, height)
+}
+
+// renderInto draws onto the provided image, dispatching by width. The buffer's
+// prior contents are reset by the chosen path, so a reused buffer is safe.
+func renderInto(img *image.Gray, sections []StopSection, now, feedTime time.Time, width, height int) *image.Gray {
 	if width >= hdMinWidth {
-		return renderHD(sections, now, feedTime, width, height)
+		return renderHD(img, sections, now, feedTime, width, height)
 	}
 
 	// --- Small-display path: flatten all sections into one sorted list ---
@@ -76,7 +124,7 @@ func Render(sections []StopSection, now, feedTime time.Time, width, height int) 
 	})
 	stopLabel := strings.Join(labels, " / ")
 
-	img := image.NewGray(image.Rect(0, 0, width, height))
+	// Small/e-ink background is white; fill in place so a reused buffer is reset.
 	for i := range img.Pix {
 		img.Pix[i] = 0xFF
 	}
@@ -159,7 +207,7 @@ const epd29MinWidth = 290 // treat displays ≥ 290px wide as 2.9" layout
 func drawText(img *image.Gray, s string, x, baseline int, c color.Gray) {
 	d := &font.Drawer{
 		Dst:  img,
-		Src:  image.NewUniform(c),
+		Src:  grayUniform(c),
 		Face: basicfont.Face7x13,
 		Dot:  fixed.P(x, baseline),
 	}
