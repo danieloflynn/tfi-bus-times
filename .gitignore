@@ -3,3 +3,7 @@ secrets.yaml
 build/
 mock_output/
 .claude/settings.local.json
+
+# Go test binaries and profiling output
+*.test
+*.prof
