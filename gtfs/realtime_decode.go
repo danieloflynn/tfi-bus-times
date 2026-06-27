@@ -73,6 +73,16 @@ type feedDecoder struct {
 
 	stops []rtStop // reused across trips, reset per trip
 
+	// delayArena backs every scheduled trip's []StopDelay for this poll. Rather
+	// than make() a fresh slice per trip (~1285 small allocations/poll), each
+	// trip appends into this one arena and is handed a 3-arg-capped sub-slice.
+	// Appends that grow the arena copy forward, but slices already handed out
+	// reference whichever backing array was current when taken and stay valid
+	// (the swap map keeps that array alive); the cap pin stops a stored slice
+	// from ever appending into a neighbour. Pre-sized from the previous poll's
+	// total, so a stable feed reallocates ~once.
+	delayArena []StopDelay
+
 	nUpdates, nAdded, nCancelled, nUnknown int
 }
 
@@ -224,7 +234,7 @@ func (d *feedDecoder) decodeTripUpdate(b []byte) error {
 		return err
 	}
 
-	delays := make([]StopDelay, 0, len(d.stops))
+	start := len(d.delayArena)
 	for i := range d.stops {
 		stu := &d.stops[i]
 		if int(stu.rel) == stopSkipped {
@@ -241,10 +251,13 @@ func (d *feedDecoder) decodeTripUpdate(b []byte) error {
 			}
 			sd.DelaySeconds = dl
 		}
-		delays = append(delays, sd)
+		d.delayArena = append(d.delayArena, sd)
 		d.nUpdates++
 	}
-	if len(delays) > 0 {
+	if end := len(d.delayArena); end > start {
+		// Cap the sub-slice at its length so the stored slice can never append
+		// into the next trip's region of the arena.
+		delays := d.delayArena[start:end:end]
 		sortStopDelays(delays)
 		d.newDelays[string(tripID)] = delays
 	}

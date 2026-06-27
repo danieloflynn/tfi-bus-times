@@ -154,6 +154,9 @@ type Poller struct {
 	store *LiveStore
 
 	rateLimitCount int
+	// prevDelayTotal is the total StopDelay count from the previous parse, used
+	// to size the decoder's delay arena so a stable feed reallocates it ~once.
+	prevDelayTotal int
 }
 
 // NewPoller creates a Poller for the given GTFS-RT endpoint. db is a holder so
@@ -277,10 +280,14 @@ func (p *Poller) parse(data []byte) error {
 		// old proto path's time.Unix(0, 0). decodeHeader overwrites this from the
 		// real header, which precedes the entities on the wire.
 		feedTime: time.Unix(0, 0),
+		// One arena backs all per-trip delay slices this poll; size it from the
+		// previous total so a stable feed reallocates it ~once.
+		delayArena: make([]StopDelay, 0, p.prevDelayTotal),
 	}
 	if err := d.decodeFeed(data); err != nil {
 		return fmt.Errorf("decode feed: %w", err)
 	}
+	p.prevDelayTotal = len(d.delayArena)
 
 	feedTime := d.feedTime
 

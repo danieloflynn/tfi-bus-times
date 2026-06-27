@@ -181,7 +181,7 @@ Both render paths build the minutes label with `fmt.Sprintf("%d min", mins)` —
 a heap allocation per row, per frame. Replace with a small stack buffer +
 `strconv.AppendInt`. Removes the only per-frame string allocations in the reused-buffer path.
 
-### 11. ⬜ realtime.parse: arena-allocate per-trip delay slices
+### 11. ✅ realtime.parse: arena-allocate per-trip delay slices
 `decodeTripUpdate` does `make([]StopDelay, 0, len(d.stops))` per scheduled trip
 (~1285/poll) → ~1285 small allocations. Allocate one arena `[]StopDelay` per
 poll (size-hinted from the previous poll's total), append into it, and hand out
@@ -214,6 +214,22 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 11 — arena-allocate per-trip delay slices (KEPT)
+Replaced the per-scheduled-trip `make([]StopDelay, …)` with a single poll-scoped
+arena (`feedDecoder.delayArena`), sized from the previous poll's total via
+`Poller.prevDelayTotal`. Each trip is handed a 3-arg-capped sub-slice; arena
+growth is safe because already-handed-out slices reference whichever backing
+array was live when taken (kept alive by the swap map) and the cap pin prevents
+cross-trip append bleed.
+
+| Benchmark   | B/op (b→a)        | allocs (b→a) |
+| ----------- | ----------------- | ------------ |
+| PollerParse | 407,192 → 406,580 | 4,535 → 4,463 |
+
+Modest in the 3-stop fixture (only ~72 trips match its stops) but scales with
+the number of watched stops on a real device — one alloc per matched scheduled
+trip becomes ~one per poll. CPU neutral; 24k fuzz execs clean, golden lock holds.
 
 ### Idea 9 & 10 — RenderHD invariant hoist + zero-alloc minutes label (KEPT)
 Hoisted frame-invariant font metrics/measurements (`BodyFace`/`RouteFace`/
