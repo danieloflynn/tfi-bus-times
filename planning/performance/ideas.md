@@ -193,6 +193,13 @@ Now caller-owned (allocated once in main before the loop) and filled in place,
 so the page-tick render allocates nothing for the section list. Small (one slice
 header/frame) but free and on the page-tick cadence.
 
+### 26. ✅ static build: parse stop_times before trips (drop the allTrips buffer)
+The build buffered every network trip into an intermediate `allTrips` map, then
+filtered to stops. Reordered so stop_times (which yields the watched-trip set) is
+parsed first and trips.txt builds `db.Trips` directly — the network-wide buffer
+is gone. BuildFromZIPFile 1,039 KB → 740 KB (-29%), ~10% faster; far larger on
+the full feed where allTrips held 100k+ trips. Golden + build fuzz clean.
+
 ### 25. ✅ handleAdded: resolve the route lazily (only when a watched stop is found) ⭐
 `handleAdded` called `routeShortName(d.db, string(routeID))` upfront for every
 ADDED trip — network-wide, mostly serving none of our stops. Deferred it until
@@ -302,6 +309,12 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 26 — parse stop_times before trips in the static build (KEPT)
+Eliminated the intermediate `allTrips` map by learning the watched-trip set from
+stop_times first, then building `db.Trips` directly while reading trips.txt.
+BuildFromZIPFile 1,039 KB → 740 KB (-29%), ~10% faster. The win scales with feed
+size (the full TFI feed buffered 100k+ trips). Runs at startup + daily refresh.
 
 ### Idea 25 — lazy route resolution in handleAdded (KEPT) ⭐
 Resolving the route (and allocating `string(routeID)`) only after a watched stop
