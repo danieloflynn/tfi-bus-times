@@ -126,6 +126,11 @@ func QueryArrivals(
 		}
 	}
 
+	// Snapshot the realtime maps once under a single RLock. They are immutable
+	// after each parse's atomic swap, so the rest of the query reads them
+	// lock-free instead of locking per candidate (was 2 RLock pairs/candidate).
+	snap := live.snapshot()
+
 	var arrivals []Arrival
 
 	stopHours := db.StopTimes[stopNumber]
@@ -156,15 +161,16 @@ func QueryArrivals(
 				continue
 			}
 
-			// Cancellation check.
-			if live.IsCancelled(st.TripID) {
+			// Cancellation check (against the snapshot; mirrors IsCancelled's 24h
+			// window using the store clock captured in the snapshot).
+			if t, ok := snap.cancels[st.TripID]; ok && snap.now.Sub(t) < 24*time.Hour {
 				continue
 			}
 
 			// Apply realtime delay.
 			var realtimeTime time.Time
 			var delayMin int
-			if sd, found := live.GetDelay(st.TripID, st.StopSequence); found {
+			if sd, found := searchDelay(snap.delays[st.TripID], st.StopSequence); found {
 				if sd.AbsTime != 0 {
 					realtimeTime = time.Unix(sd.AbsTime, 0)
 				} else {
@@ -217,8 +223,8 @@ func QueryArrivals(
 		}
 	}
 
-	// Add realtime additions.
-	for _, add := range live.GetAdditions(stopNumber) {
+	// Add realtime additions (from the same lock-free snapshot).
+	for _, add := range snap.adds[stopNumber] {
 		// Apply the route whitelist only when the route resolved to a real short
 		// name. An unresolved route (raw route_id) can't be matched against the
 		// whitelist, and these are typically the brand-new replacement services a

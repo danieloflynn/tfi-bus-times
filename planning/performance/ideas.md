@@ -170,6 +170,26 @@ QueryArrivals runs on every render + page tick (~every 5 s on the device).
 
 Status legend: ⬜ untried · 🔬 in progress · ✅ kept (committed) · ❌ reverted
 
+### 17. ✅ QueryArrivals: snapshot the LiveStore maps once per query
+The query took the LiveStore RWMutex twice per candidate stop-time (`IsCancelled`
++ `GetDelay`) plus once for `GetAdditions`. The realtime maps are replaced
+wholesale on each parse (never mutated in place), so a single RLock can capture
+all three map references + clock and the rest of the query reads them lock-free.
+Removes per-candidate lock traffic and contention with the poller goroutine.
+Kept — race-clean, golden lock holds. (≈2% faster in the single-threaded bench;
+larger benefit on-device where the poller contends for the lock.)
+
+### 18. ⬜ IsServiceActive: integer YYYYMMDD date compare (schema bump)
+`IsServiceActive` builds two `time.Date` values per candidate to normalise the
+service start/end for range comparison. Store the service window as int YYYYMMDD
+at build time and compare integers, dropping the per-candidate `time.Date`
+constructions on the hottest path. Requires a `schemaVer` bump (cache rebuild).
+
+### 19. ⬜ renderAndDisplay: reuse the per-frame sections slice
+`renderAndDisplay` allocates `make([]StopSection, len(stops))` every frame.
+Reuse a loop-owned scratch slice so the page-tick render allocates nothing for
+the section list.
+
 ### 9. ✅ RenderHD: hoist invariant font metrics/measurements out of the row loop
 `renderHD` recomputes constants on every arrival row: `BodyFace.Metrics().Ascent`,
 `hdMeasureString(BodyFace,"M")`, `hdMeasureString(TinyFace,"(Sched)")`,
@@ -214,6 +234,14 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 17 — snapshot LiveStore maps once per query (KEPT)
+Added `LiveStore.snapshot()` (one RLock → map references + clock) and
+`searchDelay` (extracted binary search). QueryArrivals now reads delays /
+cancellations / additions lock-free after a single snapshot instead of locking
+twice per candidate. QueryArrivals ~143µs → ~140µs in the single-threaded bench;
+the real win is eliminating per-candidate lock acquisition and contention with
+the poller on the device. Race detector + golden lock + full suite pass.
 
 ### Idea 16 — precompute font ascents once (KEPT, marginal)
 Exposed `fonts.HeaderAscent/RouteAscent/BodyAscent/SmallAscent` computed at

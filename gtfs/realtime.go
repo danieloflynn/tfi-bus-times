@@ -97,13 +97,16 @@ func (s *LiveStore) PollTime() time.Time {
 func (ls *LiveStore) GetDelay(tripID string, stopSequence int) (StopDelay, bool) {
 	ls.mu.RLock()
 	defer ls.mu.RUnlock()
+	return searchDelay(ls.Delays[tripID], stopSequence)
+}
 
-	delays, ok := ls.Delays[tripID]
-	if !ok || len(delays) == 0 {
+// searchDelay finds the StopDelay with the largest StopSequence ≤ stopSequence
+// in a slice sorted ascending by StopSequence. Shared by GetDelay (which holds
+// the lock) and QueryArrivals's lock-free snapshot path.
+func searchDelay(delays []StopDelay, stopSequence int) (StopDelay, bool) {
+	if len(delays) == 0 {
 		return StopDelay{}, false
 	}
-
-	// Binary search: find the largest StopSequence ≤ stopSequence.
 	lo, hi := 0, len(delays)-1
 	for lo <= hi {
 		mid := (lo + hi) / 2
@@ -121,6 +124,30 @@ func (ls *LiveStore) GetDelay(tripID string, stopSequence int) (StopDelay, bool)
 		return StopDelay{}, false
 	}
 	return delays[lo-1], true
+}
+
+// liveSnapshot is an immutable view of the realtime maps captured under a single
+// RLock. Each parse replaces these maps wholesale (they are never mutated in
+// place after the atomic swap), so once captured they are safe to read lock-free
+// for the remainder of a query. QueryArrivals uses this to avoid taking the
+// RWMutex once per candidate stop-time (it previously called IsCancelled +
+// GetDelay — two RLock/RUnlock pairs — for every candidate on every render).
+type liveSnapshot struct {
+	delays  map[string][]StopDelay
+	cancels map[string]time.Time
+	adds    map[string][]Addition
+	now     time.Time
+}
+
+func (ls *LiveStore) snapshot() liveSnapshot {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+	return liveSnapshot{
+		delays:  ls.Delays,
+		cancels: ls.Cancellations,
+		adds:    ls.Additions,
+		now:     ls.now(),
+	}
 }
 
 // IsCancelled returns true if tripID was cancelled within the last 24 hours.
