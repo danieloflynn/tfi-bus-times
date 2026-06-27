@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -74,6 +75,33 @@ func grayUniform(c color.Gray) *image.Uniform {
 
 // hdMinWidth is the threshold above which the HD layout is used.
 const hdMinWidth = 800
+
+// minStringTable precomputes "1 min".."99 min" so the render hot path (every
+// arrival row, every frame, ~5 s cadence on the device) builds no per-row
+// string. fmt.Sprintf("%d min", n) previously allocated the result plus boxed
+// the int into an interface on every row. Index 0 is unused (mins < 1 uses a
+// caller-supplied label).
+var minStringTable = func() [100]string {
+	var t [100]string
+	for i := 1; i < 100; i++ {
+		t[i] = strconv.Itoa(i) + " min"
+	}
+	return t
+}()
+
+// minLabel returns the minutes-until-arrival label with no allocation: a cached
+// table entry for 1–99, the clamped "99 min" above, and zeroLabel for < 1 (the
+// two render paths differ only here — "Due" on HD, "< 1 min" on small).
+func minLabel(mins int, zeroLabel string) string {
+	switch {
+	case mins < 1:
+		return zeroLabel
+	case mins > 99:
+		return "99 min"
+	default:
+		return minStringTable[mins]
+	}
+}
 
 // Render draws arrival sections onto a new *image.Gray of the given width/height.
 // On small displays (< hdMinWidth) all sections are merged into one sorted list.
@@ -176,15 +204,7 @@ func renderInto(img *image.Gray, sections []StopSection, now, feedTime time.Time
 		drawText(img, hs, headsignStart, baseline, black)
 
 		mins := a.MinutesUntil(now)
-		var minsStr string
-		switch {
-		case mins < 1:
-			minsStr = "< 1 min"
-		case mins > 99:
-			minsStr = "99 min"
-		default:
-			minsStr = fmt.Sprintf("%d min", mins)
-		}
+		minsStr := minLabel(mins, "< 1 min")
 		drawTextRight(img, minsStr, mEnd, baseline, black)
 
 		if !a.RealtimeTime.IsZero() && a.DelayMinutes != 0 {

@@ -1,7 +1,6 @@
 package display
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 	"math"
@@ -78,6 +77,22 @@ func renderHD(img *image.Gray, sections []StopSection, now, feedTime time.Time, 
 		return img
 	}
 
+	// Font metrics and fixed-string measurements are frame-invariant: the faces
+	// never change and "M"/"(Sched)" are constant. Computing them once here (not
+	// per arrival row) removes redundant glyph measurement on every refresh and
+	// page tick — the render runs ~every 5 s on the device.
+	bodyAscent := fonts.BodyFace.Metrics().Ascent.Ceil()
+	routeAscent := fonts.RouteFace.Metrics().Ascent.Ceil()
+	smallAscent := fonts.SmallFace.Metrics().Ascent.Ceil()
+	barAscent := fonts.HeaderFace.Metrics().Ascent.Ceil()
+	charW := hdMeasureString(fonts.BodyFace, "M")
+	if charW < 1 {
+		charW = 1
+	}
+	schedW := hdMeasureString(fonts.TinyFace, "(Sched)")
+	headsignAvail := hdHeadsignEnd - hdHeadsignStart - schedW - 8
+	maxRunes := headsignAvail / charW
+
 	// Divide remaining height evenly between sections.
 	availHeight := height - hdHeaderHeight - 2
 	numSections := len(sections)
@@ -98,7 +113,6 @@ func renderHD(img *image.Gray, sections []StopSection, now, feedTime time.Time, 
 
 		// Section header bar: white background, black label.
 		fillRect(img, 0, y, width, y+hdSectionBarHeight, white)
-		barAscent := fonts.HeaderFace.Metrics().Ascent.Ceil()
 		barBaseline := y + (hdSectionBarHeight+barAscent)/2
 		hdDrawText(img, sec.Label, 16, barBaseline, black, fonts.HeaderFace)
 
@@ -121,8 +135,7 @@ func renderHD(img *image.Gray, sections []StopSection, now, feedTime time.Time, 
 		for ri, a := range arrivals {
 			rowY := y + ri*hdRowHeight
 
-			ascent := fonts.BodyFace.Metrics().Ascent.Ceil()
-			baseline := rowY + (hdRowHeight+ascent)/2
+			baseline := rowY + (hdRowHeight+bodyAscent)/2
 
 			// Route box: skip for DART (section label is sufficient).
 			if a.RouteShort != "DART" {
@@ -132,34 +145,17 @@ func renderHD(img *image.Gray, sections []StopSection, now, feedTime time.Time, 
 				if routeX < hdRouteBoxStart+2 {
 					routeX = hdRouteBoxStart + 2
 				}
-				routeAscent := fonts.RouteFace.Metrics().Ascent.Ceil()
 				routeBaseline := rowY + (hdRowHeight+routeAscent)/2
 				hdDrawText(img, a.RouteShort, routeX, routeBaseline, white, fonts.RouteFace)
 			}
 
 			// Headsign.
-			charW := hdMeasureString(fonts.BodyFace, "M")
-			if charW < 1 {
-				charW = 1
-			}
-			schedW := hdMeasureString(fonts.TinyFace, "(Sched)")
-			headsignAvail := hdHeadsignEnd - hdHeadsignStart - schedW - 8
-			maxRunes := headsignAvail / charW
 			hs := truncate(a.Headsign, maxRunes)
 			hdDrawText(img, hs, hdHeadsignStart, baseline, white, fonts.BodyFace)
 
 			// Minutes until effective arrival (realtime if available, else scheduled).
 			mins := a.MinutesUntil(now)
-			var minsStr string
-			switch {
-			case mins < 1:
-				minsStr = "Due"
-			case mins > 99:
-				minsStr = "99 min"
-			default:
-				minsStr = fmt.Sprintf("%d min", mins)
-			}
-			smallAscent := fonts.SmallFace.Metrics().Ascent.Ceil()
+			minsStr := minLabel(mins, "Due")
 			smallBaseline := rowY + (hdRowHeight+smallAscent)/2
 			hdDrawTextRight(img, minsStr, hdMinEnd, smallBaseline, white, fonts.SmallFace)
 

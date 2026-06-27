@@ -164,6 +164,72 @@ Array-backed hour scan, `slices.SortFunc`, struct dedup key (no
 
 QueryArrivals runs on every render + page tick (~every 5 s on the device).
 
+---
+
+## Round 2 ideas (continuing iteration)
+
+Status legend: ⬜ untried · 🔬 in progress · ✅ kept (committed) · ❌ reverted
+
+### 9. ✅ RenderHD: hoist invariant font metrics/measurements out of the row loop
+`renderHD` recomputes constants on every arrival row: `BodyFace.Metrics().Ascent`,
+`hdMeasureString(BodyFace,"M")`, `hdMeasureString(TinyFace,"(Sched)")`,
+`RouteFace`/`SmallFace` ascents, and the derived `maxRunes`. All are frame-invariant.
+Compute once at the top of `renderHD`. CPU win on every refresh + page tick.
+
+### 10. ✅ Render: drop fmt.Sprintf for the "N min" string
+Both render paths build the minutes label with `fmt.Sprintf("%d min", mins)` —
+a heap allocation per row, per frame. Replace with a small stack buffer +
+`strconv.AppendInt`. Removes the only per-frame string allocations in the reused-buffer path.
+
+### 11. ⬜ realtime.parse: arena-allocate per-trip delay slices
+`decodeTripUpdate` does `make([]StopDelay, 0, len(d.stops))` per scheduled trip
+(~1285/poll) → ~1285 small allocations. Allocate one arena `[]StopDelay` per
+poll (size-hinted from the previous poll's total), append into it, and hand out
+3-arg capped sub-slices. Backing array never moves within a poll, so sub-slices
+stay valid. Collapses ~1285 allocs/poll into ~1.
+
+### 12. ⬜ QueryArrivals: drop the dedup map for small arrival counts
+The `seen2 := make(map[dedupKey]bool)` is allocated every call. Typical stops
+have a handful of arrivals; an O(N²) linear dedup over the result slice avoids
+the map allocation entirely below a small threshold.
+
+### 13. ⬜ Poller.fetch: reuse the read buffer across polls
+`io.ReadAll(resp.Body)` allocates a fresh ~776 KB buffer every poll. Read into a
+Poller-owned `bytes.Buffer` that is `Reset()` each poll so the backing array is
+recycled. parse copies out only the strings it stores, so reusing the raw bytes
+between polls is safe.
+
+### 14. ⬜ static build: kill per-row allocations in stop_times parsing
+`parseGTFSTime` uses `strings.Split` (slice alloc) on every stop_times row — the
+biggest file. Replace with an allocation-free manual `HH:MM:SS` parser. Also
+hoist the `dayNames` slice out of the calendar row callback and build the
+calendar_dates exception key without `time.Format`.
+
+### 15. ⬜ GOGC/GOMEMLIMIT tuning via the systemd unit (idea 6)
+Now that allocation churn is 20–50× lower, raise GOGC (fewer, larger GC cycles)
+and set a GOMEMLIMIT soft cap appropriate to the Pi Zero 2W's 512 MB. Non-code
+lever set in `tfi-display.service` Environment.
+
+### 16. ⬜ fonts: precompute face ascents once
+`face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
+package-level precomputed ascents from the `fonts` package so the renderer reads
+a constant instead of re-deriving metrics each call.
+
+### Idea 9 & 10 — RenderHD invariant hoist + zero-alloc minutes label (KEPT)
+Hoisted frame-invariant font metrics/measurements (`BodyFace`/`RouteFace`/
+`SmallFace`/`HeaderFace` ascents, `measure("M")`, `measure("(Sched)")`, derived
+`maxRunes`) out of the per-row loop in `renderHD`, and replaced both render
+paths' `fmt.Sprintf("%d min", mins)` with a precomputed `[100]string` table
+(`minLabel`).
+
+| Benchmark      | ns/op (b→a)         | allocs (b→a) |
+| -------------- | ------------------- | ------------ |
+| RenderHD       | 2,135,182 → 2,030,820 | 11 → 3     |
+| RendererReuse  | 1,061,441 → 1,059,000 | 5 → 1      |
+
+The reused-buffer path (the device's actual render loop) now allocates just
+1/frame (was 5). Golden render preview unchanged.
+
 ### Idea 4b — eliminate IsServiceActive's time.Format allocation (KEPT) ⭐
 An alloc profile showed `time.Time.Format` was **91%** of QueryArrivals
 allocations: `IsServiceActive` formatted `date.Format("20060102")` and
