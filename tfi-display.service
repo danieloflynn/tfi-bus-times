@@ -11,6 +11,16 @@ StateDirectory=tfi-display
 ExecStart=/usr/local/bin/tfi-display -config /etc/tfi-display/config.yaml -secrets /etc/tfi-display/secrets.yaml
 Restart=on-failure
 RestartSec=10s
+
+# GC tuning for a low-churn, long-running process on the Pi Zero 2W (512 MB).
+# After the allocation optimisations the live heap is small and allocation rate
+# is low, so the default GOGC=100 (collect when the heap doubles) runs the GC
+# more often than necessary. GOGC=200 halves GC frequency (fewer, larger cycles
+# → less GC CPU) while the absolute heap stays tiny. GOMEMLIMIT is a soft
+# backstop well under the 512 MB physical RAM (leaving room for the OS) so a
+# pathological feed can't drive the process toward OOM.
+Environment=GOGC=200
+Environment=GOMEMLIMIT=350MiB
 # Give it time to deep-sleep the display on shutdown.
 TimeoutStopSec=15s
 KillSignal=SIGTERM

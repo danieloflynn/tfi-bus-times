@@ -205,7 +205,7 @@ biggest file. Replace with an allocation-free manual `HH:MM:SS` parser. Also
 hoist the `dayNames` slice out of the calendar row callback and build the
 calendar_dates exception key without `time.Format`.
 
-### 15. ⬜ GOGC/GOMEMLIMIT tuning via the systemd unit (idea 6)
+### 15. ✅ GOGC/GOMEMLIMIT tuning via the systemd unit (idea 6)
 Now that allocation churn is 20–50× lower, raise GOGC (fewer, larger GC cycles)
 and set a GOMEMLIMIT soft cap appropriate to the Pi Zero 2W's 512 MB. Non-code
 lever set in `tfi-display.service` Environment.
@@ -214,6 +214,13 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 15 — GOGC/GOMEMLIMIT tuning in the systemd unit (KEPT)
+Added `Environment=GOGC=200` and `Environment=GOMEMLIMIT=350MiB` to
+`tfi-display.service`. With the now-small live heap and low allocation rate,
+GOGC=200 halves GC cycle frequency (less GC CPU) while the heap stays tiny;
+GOMEMLIMIT is a soft OOM backstop under the 512 MB physical RAM. Non-code lever,
+not benchmarkable in unit tests; effect is fewer GC cycles on the device.
 
 ### Idea 14 — allocation-free stop_times parsing in the static build (KEPT)
 Replaced `parseGTFSTime`'s `strings.Split` (a `[]string` alloc on every
