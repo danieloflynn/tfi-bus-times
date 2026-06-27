@@ -6,12 +6,8 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"slices"
 	"sync"
 	"time"
-
-	gtfsrt "github.com/MobilityData/gtfs-realtime-bindings/golang/gtfs"
-	"google.golang.org/protobuf/proto"
 )
 
 // StopDelay holds realtime delay data for one stop within a trip.
@@ -249,22 +245,14 @@ const (
 	maxDelaySeconds = 604800 // one week
 )
 
-// parse unmarshals a GTFS-RT protobuf and updates the LiveStore.
+// parse decodes a GTFS-RT protobuf and updates the LiveStore. It uses a custom
+// streaming wire-format decoder (realtime_decode.go) rather than
+// proto.Unmarshal so it never materialises the full FeedMessage object graph —
+// the dominant allocation source on the device every poll.
 func (p *Poller) parse(data []byte) error {
-	feed := &gtfsrt.FeedMessage{}
-	if err := proto.Unmarshal(data, feed); err != nil {
-		return fmt.Errorf("unmarshal: %w", err)
-	}
-
 	// Snapshot the static dataset once for the whole parse so a mid-parse
 	// background refresh can't make trip lookups inconsistent.
 	db := p.db.Load()
-
-	feedTS := int64(0)
-	if feed.Header != nil {
-		feedTS = int64(feed.Header.GetTimestamp())
-	}
-	feedTime := time.Unix(feedTS, 0)
 
 	// Size-hint the new maps from the previous parse so the swap rarely has to
 	// grow/rehash them — feed shape is stable poll-to-poll.
@@ -280,103 +268,21 @@ func (p *Poller) parse(data []byte) error {
 	}
 	p.store.mu.RUnlock()
 
-	nUpdates, nAdded, nCancelled, nUnknown := 0, 0, 0, 0
-
-	for _, entity := range feed.Entity {
-		tu := entity.GetTripUpdate()
-		if tu == nil {
-			continue
-		}
-		tripID := tu.GetTrip().GetTripId()
-		rel := int(tu.GetTrip().GetScheduleRelationship())
-
-		switch rel {
-		case tripCancelled:
-			newCancels[tripID] = feedTime
-			nCancelled++
-			continue
-		case tripAdded:
-			// Handle added trips: we need an arrival time for each stop.
-			routeID := tu.GetTrip().GetRouteId()
-			// Resolve route short name from our static data once per trip.
-			routeShort, routeResolved := routeShortName(db, routeID)
-			for _, stu := range tu.StopTimeUpdate {
-				// Prefer the arrival time, but fall back to the departure time:
-				// added stops sometimes carry only a departure event, and
-				// dropping them would hide the very replacement services that
-				// appear during disruptions.
-				arrTS := stu.GetArrival().GetTime()
-				if arrTS == 0 {
-					arrTS = stu.GetDeparture().GetTime()
-				}
-				if arrTS == 0 {
-					continue
-				}
-				stopNumber := resolveStopID(db, stu.GetStopId())
-				if stopNumber == "" {
-					continue
-				}
-				arr := Addition{
-					RouteShortName: routeShort,
-					ArrivalTime:    time.Unix(arrTS, 0),
-					FeedTimestamp:  feedTS,
-					RouteResolved:  routeResolved,
-				}
-				// Deduplicate: remove old entries for the same route at this stop.
-				existing := newAdds[stopNumber]
-				deduped := existing[:0]
-				for _, a := range existing {
-					if a.RouteShortName == routeShort && a.ArrivalTime.Before(arr.ArrivalTime) {
-						continue // drop old entry for same route
-					}
-					deduped = append(deduped, a)
-				}
-				newAdds[stopNumber] = append(deduped, arr)
-				nAdded++
-			}
-			continue
-		}
-
-		// Scheduled trip.
-		if _, ok := db.Trips[tripID]; !ok {
-			nUnknown++
-			continue
-		}
-
-		// Preallocate to the upper bound (one delay per stop update) so the
-		// append loop never reallocates the backing array mid-trip.
-		delays := make([]StopDelay, 0, len(tu.StopTimeUpdate))
-		for _, stu := range tu.StopTimeUpdate {
-			if int(stu.GetScheduleRelationship()) == stopSkipped {
-				continue
-			}
-
-			var sd StopDelay
-			sd.StopSequence = int32(stu.GetStopSequence())
-
-			arr := stu.GetArrival()
-			if arr.GetTime() != 0 {
-				sd.AbsTime = arr.GetTime()
-			} else {
-				d := arr.GetDelay()
-				if d > maxDelaySeconds || d < -maxDelaySeconds {
-					continue // discard implausible delays
-				}
-				sd.DelaySeconds = d
-			}
-			delays = append(delays, sd)
-			nUpdates++
-		}
-
-		if len(delays) > 0 {
-			// Sort by StopSequence for binary search later. slices.SortFunc
-			// avoids the reflection and closure-escape overhead of sort.Slice.
-			slices.SortFunc(delays, func(a, b StopDelay) int {
-				return int(a.StopSequence - b.StopSequence)
-			})
-			newDelays[tripID] = delays
-		}
+	d := feedDecoder{
+		db:         db,
+		newDelays:  newDelays,
+		newCancels: newCancels,
+		newAdds:    newAdds,
+		// Default when the feed carries no header timestamp (TS 0), matching the
+		// old proto path's time.Unix(0, 0). decodeHeader overwrites this from the
+		// real header, which precedes the entities on the wire.
+		feedTime: time.Unix(0, 0),
 	}
+	if err := d.decodeFeed(data); err != nil {
+		return fmt.Errorf("decode feed: %w", err)
+	}
+
+	feedTime := d.feedTime
 
 	// Atomic swap.
 	p.store.mu.Lock()
@@ -390,8 +296,8 @@ func (p *Poller) parse(data []byte) error {
 	p.store.mu.Unlock()
 
 	slog.Debug("realtime parsed",
-		"updates", nUpdates, "added", nAdded,
-		"cancelled", nCancelled, "unknown", nUnknown,
+		"updates", d.nUpdates, "added", d.nAdded,
+		"cancelled", d.nCancelled, "unknown", d.nUnknown,
 		"feed_time", feedTime.Format(time.RFC3339),
 	)
 	return nil

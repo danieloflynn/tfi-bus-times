@@ -43,7 +43,7 @@ Status legend: ⬜ untried · 🔬 in progress · ✅ kept (committed) · ❌ re
 - Size-hint the three `new*` maps from the previous parse's counts.
 - Expected: modest alloc/CPU reduction in PollerParse; low risk.
 
-### 2. ⬜ Custom streaming protobuf decoder for the RT feed
+### 2. ✅ Custom streaming protobuf decoder for the RT feed
 - `proto.Unmarshal` allocates a struct for every entity, trip descriptor, stop
   update and stop-time event. We only need a handful of scalar fields. Walk the
   protobuf wire format directly with `protowire`, extracting only what we use,
@@ -81,3 +81,23 @@ previous parse.
 
 Small but consistent (-126 KB, -351 allocs across 3 runs), no downside, cleaner
 code. Confirms the dominant cost is `proto.Unmarshal` itself (Idea 2).
+
+### Idea 2 — custom streaming protobuf decoder (KEPT) ⭐ biggest win so far
+New `gtfs/realtime_decode.go` walks the GTFS-RT wire format with `protowire`,
+extracting only the scalar fields `parse` uses (trip_id, schedule_relationship,
+route_id, stop_sequence, arrival/departure time + delay, stop_id) and never
+building the FeedMessage object graph. A reused `[]rtStop` scratch slice avoids
+per-stop allocation; trip/route/stop IDs stay `[]byte` sub-slices and are only
+materialised to `string` when actually stored in a map (the `m[string(b)]`
+no-copy lookup optimisation handles the ~1500 unknown scheduled trips for free).
+
+| Benchmark   | Before     | After     | Change          |
+| ----------- | ---------- | --------- | --------------- |
+| PollerParse ns/op    | 11,329,569 | 1,467,356 | **7.7× faster** |
+| PollerParse B/op     | 7,405,966  | 407,187   | **18× less**    |
+| PollerParse allocs/op| 210,047    | 4,535     | **46× fewer**   |
+
+Validated by the full gtfs suite incl. the golden end-to-end behaviour lock
+(identical observable arrivals) and 13k fuzz execs with no panic. This is the
+poll-cadence hot path (every 60 s on the device), so it directly removes the
+dominant GC-pressure and CPU source.
