@@ -188,7 +188,7 @@ poll (size-hinted from the previous poll's total), append into it, and hand out
 3-arg capped sub-slices. Backing array never moves within a poll, so sub-slices
 stay valid. Collapses ~1285 allocs/poll into ~1.
 
-### 12. ⬜ QueryArrivals: drop the dedup map for small arrival counts
+### 12. ✅ QueryArrivals: drop the dedup map for small arrival counts
 The `seen2 := make(map[dedupKey]bool)` is allocated every call. Typical stops
 have a handful of arrivals; an O(N²) linear dedup over the result slice avoids
 the map allocation entirely below a small threshold.
@@ -214,6 +214,18 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 12 — linear dedup for small arrival counts (KEPT)
+Replaced the unconditional `make(map[dedupKey]bool)` in QueryArrivals's dedup
+with an allocation-free O(N²) linear scan below `dedupLinearMax` (48), keeping
+the map only for the rare large result set.
+
+| Benchmark     | ns/op (b→a)       | B/op (b→a)      | allocs (b→a) |
+| ------------- | ----------------- | --------------- | ------------ |
+| QueryArrivals | 142,940 → ~143,000 | 9,280 → 7,472  | 19 → 13      |
+
+(Benchmark queries 3 stops/iter, so this removes 3 map allocations — 2
+allocs each.) CPU flat; full gtfs suite + golden lock pass.
 
 ### Idea 11 — arena-allocate per-trip delay slices (KEPT)
 Replaced the per-scheduled-trip `make([]StopDelay, …)` with a single poll-scoped

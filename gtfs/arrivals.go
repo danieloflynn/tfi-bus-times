@@ -13,6 +13,12 @@ import (
 // per-query scan trivially cheap.
 const lookbackHours = 3
 
+// dedupLinearMax is the arrival-count threshold below which QueryArrivals
+// deduplicates with an allocation-free O(N²) linear scan instead of a map. Real
+// stops rarely exceed a few dozen arrivals in the window, so the linear path is
+// the common case and avoids the per-query map allocation.
+const dedupLinearMax = 48
+
 // Arrival is one upcoming bus arrival as shown on the display.
 type Arrival struct {
 	RouteShort    string
@@ -244,20 +250,39 @@ func QueryArrivals(
 		})
 	}
 
-	// Deduplicate: same tripID can appear in multiple hour buckets. Key on a
-	// small struct {route, scheduled-unix} instead of a formatted string so the
-	// per-arrival ScheduledTime.String() allocation is avoided.
-	type dedupKey struct {
-		route string
-		unix  int64
-	}
-	seen2 := make(map[dedupKey]bool, len(arrivals))
+	// Deduplicate: same tripID can appear in multiple hour buckets. Most stops
+	// yield only a handful of arrivals, so a linear scan over the kept results
+	// (in-place filter; reading already-written slots is safe) avoids allocating
+	// the dedup map at all. Only fall back to a map above dedupLinearMax, where
+	// the O(N²) scan would start to cost more than the map. Dedup key is
+	// {route, scheduled-unix} (no formatted-string allocation).
 	deduped := arrivals[:0]
-	for _, a := range arrivals {
-		key := dedupKey{a.RouteShort, a.ScheduledTime.Unix()}
-		if !seen2[key] {
-			seen2[key] = true
-			deduped = append(deduped, a)
+	if len(arrivals) <= dedupLinearMax {
+		for _, a := range arrivals {
+			u := a.ScheduledTime.Unix()
+			dup := false
+			for j := range deduped {
+				if deduped[j].RouteShort == a.RouteShort && deduped[j].ScheduledTime.Unix() == u {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				deduped = append(deduped, a)
+			}
+		}
+	} else {
+		type dedupKey struct {
+			route string
+			unix  int64
+		}
+		seen2 := make(map[dedupKey]bool, len(arrivals))
+		for _, a := range arrivals {
+			key := dedupKey{a.RouteShort, a.ScheduledTime.Unix()}
+			if !seen2[key] {
+				seen2[key] = true
+				deduped = append(deduped, a)
+			}
 		}
 	}
 
