@@ -187,10 +187,24 @@ query's CPU. Replaced with `Date()` accessors + packed-int YYYYMMDD comparison.
 No schema bump needed (computed inline from the existing time.Time fields).
 **QueryArrivals ~140µs → ~82µs (1.7× faster).**
 
-### 19. ⬜ renderAndDisplay: reuse the per-frame sections slice
-`renderAndDisplay` allocates `make([]StopSection, len(stops))` every frame.
-Reuse a loop-owned scratch slice so the page-tick render allocates nothing for
-the section list.
+### 19. ✅ renderAndDisplay: reuse the per-frame sections slice
+`renderAndDisplay` allocated `make([]StopSection, len(stops))` every frame.
+Now caller-owned (allocated once in main before the loop) and filled in place,
+so the page-tick render allocates nothing for the section list. Small (one slice
+header/frame) but free and on the page-tick cadence.
+
+### 21. ✅ lcd driver: per-row Pix walk instead of per-pixel GrayAt ⭐
+`writeRGB565`/`writeXRGB8888` called `img.GrayAt(x,y)` for each of ~614k pixels
+per frame — every call recomputes a `PixOffset` (multiply) and bounds-checks.
+Replaced with a per-row slice of `img.Pix` ranged over directly.
+
+| Benchmark (1024×600 frame) | ns/op (b→a)        |
+| -------------------------- | ------------------ |
+| writeRGB565                | 2,010,000 → 1,065,000 |
+
+**~1.9× faster** per-frame framebuffer pack on the device's real display path
+(runs on every refresh + page tick). Added off-hardware packing correctness
+tests (RGB565 + XRGB8888) and a benchmark.
 
 ### 20. ✅ handleAdded: drop ADDED-trip stops outside the watched set ⭐⭐
 An alloc profile showed `handleAdded` was **94%** of PollerParse allocations.
@@ -254,6 +268,13 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 19 & 21 — render-loop sections reuse + lcd per-row Pix walk (KEPT)
+Idea 19: `renderAndDisplay` now fills a caller-owned `sections` slice (allocated
+once in main) instead of `make`-ing one per frame. Idea 21: the framebuffer
+packing loops walk `img.Pix` per row instead of calling `GrayAt` per pixel,
+~1.9× faster per frame (2.0 ms → 1.06 ms at 1024×600). Both on the per-frame
+device path. New driver packing tests + benchmark added.
 
 ### Idea 20 — drop unwatched ADDED-trip stops in handleAdded (KEPT) ⭐⭐ biggest round-2 win
 See idea 20 above. The decoder now resolves each added stop against the watched

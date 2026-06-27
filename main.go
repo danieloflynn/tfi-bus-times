@@ -191,9 +191,13 @@ func main() {
 	// allocated once, not on every refresh/page tick.
 	renderer := &display.Renderer{}
 
+	// Reused across frames so the per-frame render allocates nothing for the
+	// section-list header (its length is fixed by the configured stops).
+	sections := make([]display.StopSection, len(cfg.Stops))
+
 	// Render immediately on start (if awake).
 	if !sleeping {
-		renderAndDisplay(renderer, drv, dbHolder, live, cfg, routeFilter, page)
+		renderAndDisplay(renderer, sections, drv, dbHolder, live, cfg, routeFilter, page)
 	}
 
 	// Signal handler for graceful shutdown.
@@ -210,7 +214,7 @@ func main() {
 					slog.Warn("display wake failed", "err", err)
 				}
 				sleeping = false
-				renderAndDisplay(renderer, drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, sections, drv, dbHolder, live, cfg, routeFilter, page)
 			} else if !sleeping && !active {
 				slog.Info("outside active hours — sleeping display")
 				drv.Clear()
@@ -221,12 +225,12 @@ func main() {
 			}
 		case <-refreshTicker.C:
 			if !sleeping {
-				renderAndDisplay(renderer, drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, sections, drv, dbHolder, live, cfg, routeFilter, page)
 			}
 		case <-pageTicker.C:
 			if !sleeping {
 				page++
-				renderAndDisplay(renderer, drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, sections, drv, dbHolder, live, cfg, routeFilter, page)
 			}
 		case sig := <-quit:
 			slog.Info("shutting down", "signal", sig)
@@ -256,6 +260,7 @@ func isActiveTime(now, start, stop time.Time) bool {
 // page selects which window of cfg.PageSize arrivals to show; it wraps per-section.
 func renderAndDisplay(
 	renderer *display.Renderer,
+	sections []display.StopSection,
 	drv driver.Driver,
 	dbHolder *gtfs.DB,
 	live *gtfs.LiveStore,
@@ -273,7 +278,7 @@ func renderAndDisplay(
 
 	pageSize := display.RowsPerSection(len(cfg.Stops), drv.Width(), drv.Height())
 
-	sections := make([]display.StopSection, len(cfg.Stops))
+	// sections is caller-owned and reused across frames; fill it in place.
 	totalArrivals := 0
 	for i, s := range cfg.Stops {
 		arr := gtfs.QueryArrivals(db, live, s.StopNumber, now, cfg.MaxMinutes, s.WalkingMinutes, routeFilter)
