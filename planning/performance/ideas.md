@@ -63,7 +63,7 @@ Status legend: ⬜ untried · 🔬 in progress · ✅ kept (committed) · ❌ re
   `RouteShort+ScheduledTime.String()`).
 - Result: 685→598 allocs (-13%), 16,312→13,912 B (-15%), ~2.5% faster.
 
-### 4b. ⬜ QueryArrivals: kill IsServiceActive per-candidate allocations
+### 4b. ✅ QueryArrivals: kill IsServiceActive per-candidate allocations
 - `IsServiceActive` runs per candidate stop-time and does
   `serviceID + ":" + date.Format("20060102")` — a time-format + string concat
   allocation on every call. Restructure the exceptions key / date handling to
@@ -121,3 +121,19 @@ Array-backed hour scan, `slices.SortFunc`, struct dedup key (no
 | QueryArrivals | 204,305 → 199,000  | 16,312 → 13,912 | 685 → 598    |
 
 QueryArrivals runs on every render + page tick (~every 5 s on the device).
+
+### Idea 4b — eliminate IsServiceActive's time.Format allocation (KEPT) ⭐
+An alloc profile showed `time.Time.Format` was **91%** of QueryArrivals
+allocations: `IsServiceActive` formatted `date.Format("20060102")` and
+concatenated `serviceID + ":" + dateStr` to look up the exceptions map *per
+candidate stop-time*. Replaced with a 64-byte stack buffer built via an
+allocation-free `appendYYYYMMDD`, looked up through the compiler's no-copy
+`db.Exceptions[string(buf)]` optimisation. The `Exceptions` map keeps its exact
+string key + gob format, so no schema bump and no test changes.
+
+| Benchmark (vs Idea-4-part-1) | ns/op           | B/op           | allocs  |
+| ---------------------------- | --------------- | -------------- | ------- |
+| QueryArrivals                | 199,000 → 137,000 | 13,912 → 9,280 | 598 → 19 |
+
+Cumulative vs baseline: QueryArrivals **685 → 19 allocs (36×)**, 204µs → 137µs
+(33% faster), 16.3 KB → 9.3 KB. Golden lock + full suite still pass.

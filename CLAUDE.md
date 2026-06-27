@@ -60,6 +60,8 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 **Hour-bucket indexing** — `StaticDB.StopTimes` is indexed `stopNumber → hour → []StopTime`. `QueryArrivals` scans only the relevant hour buckets (current hour ±1 plus lookahead), keeping query time sub-millisecond even for large feeds.
 
+**Allocation-free hot paths** — `QueryArrivals` and its `IsServiceActive` run on every render and page tick (~every 5 s), so they avoid per-candidate heap allocation: the hour scan uses stack-backed `[24]` arrays (not a map), dedup keys on a `{route, unix}` struct (not a formatted string), and the calendar-exception lookup builds `serviceID:YYYYMMDD` in a stack buffer via `appendYYYYMMDD` and looks it up with the no-copy `db.Exceptions[string(buf)]` form (a `time.Format` here was once 91 % of the query's allocations). `Exceptions` keeps its string key + gob format. Don't reintroduce `time.Format`, `fmt.Sprintf`, or string concatenation on these paths — prefer `slices.SortFunc` over `sort.Slice` and stack buffers over formatted keys.
+
 **12-hour rule for overnight trips** — GTFS allows arrival times > 24:00 (e.g. `25:30:00`). When reconstructing wall-clock time, if the scheduled seconds-since-midnight is more than 12 hours behind `now`, the arrival is treated as belonging to the next calendar day.
 
 **Walking-time cutoff** — each stop may set `walking_minutes`. `QueryArrivals` drops any arrival whose *effective* time (realtime if present, else scheduled) falls before `now + walking_minutes`, since you couldn't reach the stop in time. The cutoff is strictly-under: a bus arriving exactly at `now + walking_minutes` is still shown. `0` (or omitted, or negative — clamped to 0 at load) disables it.

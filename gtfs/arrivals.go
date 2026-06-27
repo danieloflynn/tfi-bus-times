@@ -46,8 +46,17 @@ func IsServiceActive(db *StaticDB, serviceID string, dt time.Time) bool {
 	// comparisons work regardless of the time-of-day component in dt.
 	date := time.Date(dt.Year(), dt.Month(), dt.Day(), 0, 0, 0, 0, dt.Location())
 
-	key := serviceID + ":" + date.Format("20060102")
-	if ex, ok := db.Exceptions[key]; ok {
+	// Build "serviceID:YYYYMMDD" in a stack buffer and look it up via
+	// m[string(b)] — the compiler elides the []byte→string copy, so this hot
+	// path (run per candidate stop-time on every render) avoids the
+	// time.Format + concatenation allocation that dominated the query's heap.
+	var keyBuf [64]byte
+	kb := keyBuf[:0]
+	kb = append(kb, serviceID...)
+	kb = append(kb, ':')
+	y, mo, d := date.Date()
+	kb = appendYYYYMMDD(kb, y, int(mo), d)
+	if ex, ok := db.Exceptions[string(kb)]; ok {
 		return ex == 1 // 1 = added, 2 = removed
 	}
 	svc, ok := db.Services[serviceID]
@@ -257,6 +266,16 @@ func QueryArrivals(
 		return a.EffectiveTime().Compare(b.EffectiveTime())
 	})
 	return deduped
+}
+
+// appendYYYYMMDD appends a zero-padded YYYYMMDD date to b, matching
+// time.Format("20060102") without allocating. Used to build exception-map keys
+// on the QueryArrivals hot path.
+func appendYYYYMMDD(b []byte, y, m, d int) []byte {
+	b = append(b, byte('0'+(y/1000)%10), byte('0'+(y/100)%10), byte('0'+(y/10)%10), byte('0'+y%10))
+	b = append(b, byte('0'+(m/10)%10), byte('0'+m%10))
+	b = append(b, byte('0'+(d/10)%10), byte('0'+d%10))
+	return b
 }
 
 // BuildRouteFilter converts a slice of route short names into a lookup map.
