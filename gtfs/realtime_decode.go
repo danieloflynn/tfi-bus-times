@@ -281,10 +281,14 @@ func (d *feedDecoder) decodeTripUpdate(b []byte) error {
 // handleAdded reproduces the ADDED-trip stop handling from parse: each stop
 // becomes an Addition keyed by resolved stop number, with per-route dedup.
 func (d *feedDecoder) handleAdded(tuBuf, routeID []byte) error {
-	routeShort, routeResolved := routeShortName(d.db, string(routeID))
 	if err := d.collectStops(tuBuf); err != nil {
 		return err
 	}
+	// Resolve the route lazily, only once a watched stop is actually found:
+	// added trips are network-wide and most serve none of our stops, so
+	// allocating string(routeID) upfront for every one was wasted work.
+	var routeShort string
+	var routeResolved, routeDone bool
 	for i := range d.stops {
 		stu := &d.stops[i]
 		// Prefer arrival, fall back to departure: added stops sometimes carry
@@ -305,6 +309,10 @@ func (d *feedDecoder) handleAdded(tuBuf, routeID []byte) error {
 		stopNumber, ok := d.resolveWatchedStop(stu.stopID)
 		if !ok {
 			continue
+		}
+		if !routeDone {
+			routeShort, routeResolved = routeShortName(d.db, string(routeID))
+			routeDone = true
 		}
 		arr := Addition{
 			RouteShortName: routeShort,

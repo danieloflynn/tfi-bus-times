@@ -193,6 +193,11 @@ Now caller-owned (allocated once in main before the loop) and filled in place,
 so the page-tick render allocates nothing for the section list. Small (one slice
 header/frame) but free and on the page-tick cadence.
 
+### 25. ✅ handleAdded: resolve the route lazily (only when a watched stop is found) ⭐
+`handleAdded` called `routeShortName(d.db, string(routeID))` upfront for every
+ADDED trip — network-wide, mostly serving none of our stops. Deferred it until
+the first watched stop in the trip is found. PollerParse 208 → 86 allocs/op.
+
 ### 23. ✅ parse: filter cancellations to known (watched-stop) trips
 The feed cancels trips network-wide; each allocated `string(tripID)` for the
 Cancellations map even though QueryArrivals only looks up cancellations for
@@ -297,6 +302,11 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 25 — lazy route resolution in handleAdded (KEPT) ⭐
+Resolving the route (and allocating `string(routeID)`) only after a watched stop
+is found dropped PollerParse from 208 → 86 allocs/op. Combined with ideas 20/23,
+the per-poll allocation count fell from 4,535 (session start) to **86** (53×).
 
 ### Idea 23 & 24 — cancellation filter + stops-scratch reuse (KEPT)
 Two more per-poll cuts after the additions filter (idea 20): cancellations are
