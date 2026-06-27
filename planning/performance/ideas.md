@@ -117,8 +117,30 @@ The two continuously-running paths on the device — the realtime poll (every
 | Frame render (device, reused) | n/a (new path)   | 614 KB → ~0.6 KB  | 40 → 5          |
 
 Order-of-magnitude reductions in allocations on every recurring operation, which
-is what drives GC CPU on the Pi Zero 2W. Still pending: ideas 6 (GC tuning) and
-BuildFromZIPFile (startup/daily, low priority — see below).
+is what drives GC CPU on the Pi Zero 2W.
+
+## Round 2 cumulative summary (start-of-round → current)
+
+Round 2 (ideas 9–28) drove the hot paths much further — most notably by not
+storing/processing the network-wide ADDED trips and cancellations the board
+never displays, by an integer date comparison in the calendar check, and by a
+reusable arrivals scratch that makes the render query allocation-free.
+
+| Path                              | ns/op (b→a)              | B/op (b→a)            | allocs/op (b→a) |
+| --------------------------------- | ------------------------ | --------------------- | --------------- |
+| PollerParse (per poll)            | 1.47 ms → 1.06 ms (1.4×) | 407 KB → 20.8 KB (**19.6×**) | 4,535 → 86 (**52.7×**) |
+| QueryArrivals (one-shot)          | 143 µs → 91 µs (1.56×)   | 9.3 KB → 7.5 KB       | 19 → 13         |
+| QueryArrivals (render loop reuse) | 143 µs → 85 µs (1.68×)   | 9.3 KB → **0**        | 19 → **0**      |
+| BuildFromZIPFile (startup/daily)  | 2.40 ms → 2.13 ms (1.1×) | 1.10 MB → 740 KB (1.49×) | 4,583 → 3,265 |
+| Frame pack writeRGB565 (device)   | 2.01 ms → 1.06 ms (1.9×) | 0                     | 0               |
+| RenderHD                          | —                        | —                     | 11 → 3          |
+| RendererReuse (device frame)      | —                        | ~0.6 KB               | 5 → 1           |
+
+End-to-end since the original baseline (925d689): PollerParse **210,047 → 86
+allocs (2440×)** and **7.41 MB → 20.8 KB**; the render query is now fully
+allocation-free in the device's reuse path. GC pressure on the Pi Zero 2W is
+effectively eliminated on both recurring paths. Plus a non-code GC-tuning lever
+(GOGC/GOMEMLIMIT) in the systemd unit.
 
 ## Results log
 
