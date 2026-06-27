@@ -184,6 +184,10 @@ type Poller struct {
 	// prevDelayTotal is the total StopDelay count from the previous parse, used
 	// to size the decoder's delay arena so a stable feed reallocates it ~once.
 	prevDelayTotal int
+	// stopsScratch is the decoder's per-trip StopTimeUpdate scratch, retained
+	// across polls so it reaches steady-state capacity once instead of regrowing
+	// every poll. Single-goroutine (Poll), so no synchronisation needed.
+	stopsScratch []rtStop
 	// readBuf is reused across polls to hold the raw feed body (~776 KB). parse
 	// copies out (string(...)) every value it retains, so no sub-slice of the
 	// body outlives the parse — the backing array is safe to recycle next poll.
@@ -344,11 +348,15 @@ func (p *Poller) parse(data []byte) error {
 		// previous total so a stable feed reallocates it ~once.
 		delayArena: make([]StopDelay, 0, p.prevDelayTotal),
 		watched:    p.watched,
+		// Reuse the StopTimeUpdate scratch across polls (collectStops resets it
+		// per trip); it reaches steady-state capacity once.
+		stops: p.stopsScratch[:0],
 	}
 	if err := d.decodeFeed(data); err != nil {
 		return fmt.Errorf("decode feed: %w", err)
 	}
 	p.prevDelayTotal = len(d.delayArena)
+	p.stopsScratch = d.stops // retain grown backing for the next poll
 
 	feedTime := d.feedTime
 

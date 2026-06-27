@@ -220,6 +220,17 @@ func (d *feedDecoder) decodeTripUpdate(b []byte) error {
 
 	switch int(rel) {
 	case tripCancelled:
+		// Only record cancellations for trips that serve a watched stop (present
+		// in db.Trips, which is built filtered to those trips). QueryArrivals only
+		// ever looks up cancellations for such trips, so storing the rest — the
+		// feed cancels network-wide — is pure waste (a string alloc per cancelled
+		// trip). watched == nil means no configured filter (watch-all): keep every
+		// one, as the LiveStore carry-over contract tests expect.
+		if d.watched != nil {
+			if _, ok := d.db.Trips[string(tripID)]; !ok {
+				return nil
+			}
+		}
 		d.newCancels[string(tripID)] = d.feedTime
 		d.nCancelled++
 		return nil

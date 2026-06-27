@@ -193,6 +193,19 @@ Now caller-owned (allocated once in main before the loop) and filled in place,
 so the page-tick render allocates nothing for the section list. Small (one slice
 header/frame) but free and on the page-tick cadence.
 
+### 23. ✅ parse: filter cancellations to known (watched-stop) trips
+The feed cancels trips network-wide; each allocated `string(tripID)` for the
+Cancellations map even though QueryArrivals only looks up cancellations for
+trips in `db.Trips` (built filtered to watched stops). Skip storing a
+cancellation when a configured filter is active and the trip isn't in db.Trips.
+`watched == nil` (no filter) keeps all, preserving the LiveStore carry-over
+contract tests. PollerParse 298 → 215 allocs, 36.5 → 30.2 KB.
+
+### 24. ✅ parse: reuse the StopTimeUpdate scratch across polls
+`feedDecoder.stops` started nil each poll and regrew; retained it on the Poller
+(like the delay arena / read buffer) so it reaches steady-state capacity once.
+PollerParse 215 → 208 allocs, 30.2 → 22.2 KB.
+
 ### 22. ✅ QueryArrivals: reusable scratch (`QueryArrivalsInto`) for zero-alloc renders
 The query's remaining 13 allocs/call were entirely the `arrivals` slice growing
 from nil (geometric reallocation). Added `QueryArrivalsInto(dst, …)`:
@@ -284,6 +297,13 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 23 & 24 — cancellation filter + stops-scratch reuse (KEPT)
+Two more per-poll cuts after the additions filter (idea 20): cancellations are
+now stored only for trips serving watched stops (network-wide cancels were a
+string alloc each), and the decoder's StopTimeUpdate scratch is retained on the
+Poller across polls. Combined: PollerParse 298 → 208 allocs, 36.5 → 22.2 KB.
+Race-clean, golden lock holds, 120k fuzz execs clean.
 
 ### Idea 22 — QueryArrivalsInto reusable scratch (KEPT)
 Added a `dst`-scratch variant so the render loop reuses one arrivals backing per
