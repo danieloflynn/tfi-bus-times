@@ -187,9 +187,13 @@ func main() {
 
 	page := 0
 
+	// One renderer reused for the whole loop so the ~600 KB frame buffer is
+	// allocated once, not on every refresh/page tick.
+	renderer := &display.Renderer{}
+
 	// Render immediately on start (if awake).
 	if !sleeping {
-		renderAndDisplay(drv, dbHolder, live, cfg, routeFilter, page)
+		renderAndDisplay(renderer, drv, dbHolder, live, cfg, routeFilter, page)
 	}
 
 	// Signal handler for graceful shutdown.
@@ -206,7 +210,7 @@ func main() {
 					slog.Warn("display wake failed", "err", err)
 				}
 				sleeping = false
-				renderAndDisplay(drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, drv, dbHolder, live, cfg, routeFilter, page)
 			} else if !sleeping && !active {
 				slog.Info("outside active hours — sleeping display")
 				drv.Clear()
@@ -217,12 +221,12 @@ func main() {
 			}
 		case <-refreshTicker.C:
 			if !sleeping {
-				renderAndDisplay(drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, drv, dbHolder, live, cfg, routeFilter, page)
 			}
 		case <-pageTicker.C:
 			if !sleeping {
 				page++
-				renderAndDisplay(drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, drv, dbHolder, live, cfg, routeFilter, page)
 			}
 		case sig := <-quit:
 			slog.Info("shutting down", "signal", sig)
@@ -251,6 +255,7 @@ func isActiveTime(now, start, stop time.Time) bool {
 // renderAndDisplay queries arrivals per stop and pushes a new frame to the display.
 // page selects which window of cfg.PageSize arrivals to show; it wraps per-section.
 func renderAndDisplay(
+	renderer *display.Renderer,
 	drv driver.Driver,
 	dbHolder *gtfs.DB,
 	live *gtfs.LiveStore,
@@ -278,7 +283,7 @@ func renderAndDisplay(
 		sections[i] = display.StopSection{Label: s.Label, Arrivals: arr}
 	}
 
-	img := display.Render(sections, now, updated, drv.Width(), drv.Height())
+	img := renderer.Render(sections, now, updated, drv.Width(), drv.Height())
 	if err := drv.DisplayFrame(img); err != nil {
 		slog.Error("display frame", "err", err)
 	} else {

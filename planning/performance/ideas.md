@@ -76,11 +76,18 @@ Status legend: ⬜ untried · 🔬 in progress · ✅ kept (committed) · ❌ re
   small-display `drawText`. Image bytes/CPU unchanged (dominated by the buffer +
   font rendering).
 
-### 5b. ⬜ RenderHD: reuse the image buffer across frames
-- The 614 KB `image.NewGray` is allocated every frame (every page tick, ~5 s).
-  Reusing one buffer would eliminate ~440 MB/hr of GC churn. Needs care: the
-  driver must finish consuming the frame before it is overwritten. Check
-  `DisplayFrame` copies pixels synchronously first.
+### 5b. ✅ RenderHD: reuse the image buffer across frames ⭐
+- The 614 KB `image.NewGray` was allocated every frame (every page tick, ~5 s).
+  Verified `LCDDPI.DisplayFrame` copies pixels synchronously into the mmap'd
+  framebuffer and retains no reference, and `renderAndDisplay` discards the
+  frame after, so the buffer is safe to reuse.
+- Added a `display.Renderer` that holds one `*image.Gray`, reallocating only on
+  a size change; both render paths now reset the background in place (HD
+  `clear()`s to black, small fills white) and draw into the provided buffer.
+  `main.go` creates one `Renderer` before the loop and reuses it.
+- Result: per-frame image allocation eliminated — RendererReuse benchmark
+  ~590 B / 5 allocs vs the allocating path's 614,640 B / 11 allocs. On the
+  device this removes ~440 MB/hr of GC churn at the page cadence.
 
 ### 6. ⬜ GOGC / GOMEMLIMIT tuning for the device
 - Non-code lever: tune GC aggressiveness for a low-churn long-running process.

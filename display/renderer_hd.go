@@ -49,10 +49,11 @@ func RowsPerSection(numSections, width, height int) int {
 	return rows
 }
 
-// renderHD draws per-stop sections onto a large display image.
+// renderHD draws per-stop sections onto the provided large display image.
 // Each section gets a labelled header bar followed by its arrival rows.
-// Available height is divided evenly between sections.
-func renderHD(sections []StopSection, now, feedTime time.Time, width, height int) *image.Gray {
+// Available height is divided evenly between sections. The image is reset to the
+// black background here, so callers may reuse a buffer across frames.
+func renderHD(img *image.Gray, sections []StopSection, now, feedTime time.Time, width, height int) *image.Gray {
 	// Scale column x-coordinates proportionally from the 1872-px base layout.
 	s := float64(width) / 1872.0
 	sc := func(base int) int { return int(math.Round(float64(base) * s)) }
@@ -61,8 +62,9 @@ func renderHD(sections []StopSection, now, feedTime time.Time, width, height int
 	hdHeadsignEnd    := sc(hdBaseHeadsignEnd)
 	hdMinEnd := sc(hdBaseMinEnd)
 
-	img := image.NewGray(image.Rect(0, 0, width, height))
-	// Background is black.
+	// Background is black (zeroed). clear is a cheap memset on a fresh buffer and
+	// resets a reused one.
+	clear(img.Pix)
 
 	// Top header: build version on the left, timestamp on the right.
 	headerBaseline := (hdHeaderHeight + fonts.HeaderFace.Metrics().Ascent.Ceil()) / 2

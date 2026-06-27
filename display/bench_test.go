@@ -55,3 +55,30 @@ func BenchmarkFuzzBench_RenderHD(b *testing.B) {
 		_ = display.Render(sections, now, feedTime, 1024, 600)
 	}
 }
+
+// BenchmarkFuzzBench_RendererReuse measures the buffer-reusing Renderer: the
+// per-frame image allocation should be gone (the device redraws every page tick).
+func BenchmarkFuzzBench_RendererReuse(b *testing.B) {
+	loc, err := time.LoadLocation("Europe/Dublin")
+	if err != nil {
+		loc = time.FixedZone("IST", 3600)
+	}
+	now := time.Unix(1782497185, 0).In(loc)
+	mn := func(n int) time.Time { return now.Add(time.Duration(n) * time.Minute) }
+	sections := []display.StopSection{
+		{Label: "Vinny's", Arrivals: []gtfs.Arrival{
+			{RouteShort: "4", Headsign: "Heuston Station", ScheduledTime: mn(1), RealtimeTime: mn(2), DelayMinutes: 1},
+			{RouteShort: "7A", Headsign: "Mountjoy Square", ScheduledTime: mn(8), RealtimeTime: mn(13), DelayMinutes: 5},
+			{RouteShort: "4", Headsign: "Heuston Station", ScheduledTime: mn(11)},
+		}},
+		{Label: "DART", Arrivals: []gtfs.Arrival{
+			{RouteShort: "DART", Platform: "1", Headsign: "Greystones", ScheduledTime: mn(0), RealtimeTime: mn(6), DelayMinutes: 6},
+		}},
+	}
+	r := &display.Renderer{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = r.Render(sections, now, now, 1024, 600)
+	}
+}
