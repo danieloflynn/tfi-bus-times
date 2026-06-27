@@ -192,6 +192,24 @@ No schema bump needed (computed inline from the existing time.Time fields).
 Reuse a loop-owned scratch slice so the page-tick render allocates nothing for
 the section list.
 
+### 20. ✅ handleAdded: drop ADDED-trip stops outside the watched set ⭐⭐
+An alloc profile showed `handleAdded` was **94%** of PollerParse allocations.
+The RT feed carries ADDED (replacement) trips network-wide — thousands of
+stop-updates/poll — and each allocated `string(stu.stopID)` to file an Addition,
+even for the thousands of stops the board never displays (QueryArrivals only
+reads configured stops). Added `feedDecoder.resolveWatchedStop`: no-copy
+`m[string(b)]` membership checks resolve the stop and the id string is
+materialised only when the stop is in the watched set. `nil` watched set (no
+configured filter) keeps every stop, exactly matching the old behaviour, so the
+unit tests on synthetic DBs are unaffected.
+
+| Benchmark   | ns/op (b→a)         | B/op (b→a)        | allocs (b→a)  |
+| ----------- | ------------------- | ----------------- | ------------- |
+| PollerParse | 1,453,614 → 1,015,000 | 406,578 → 36,556 | 4,463 → 298   |
+
+**11× less memory, 15× fewer allocations, 1.45× faster per poll.** Golden lock
+holds (watched-stop additions unchanged), race-clean, 41k fuzz execs clean.
+
 ### 9. ✅ RenderHD: hoist invariant font metrics/measurements out of the row loop
 `renderHD` recomputes constants on every arrival row: `BodyFace.Metrics().Ascent`,
 `hdMeasureString(BodyFace,"M")`, `hdMeasureString(TinyFace,"(Sched)")`,
@@ -236,6 +254,14 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 20 — drop unwatched ADDED-trip stops in handleAdded (KEPT) ⭐⭐ biggest round-2 win
+See idea 20 above. The decoder now resolves each added stop against the watched
+set with no-copy lookups and only allocates the stop_number string when an
+Addition is actually stored. PollerParse: 4,463 → 298 allocs (15×), 407 KB →
+36.5 KB (11×), 1.45 ms → 1.01 ms. This is the dominant per-poll path on the
+device, so it directly removes the remaining GC pressure left after the
+streaming decoder (idea 2).
 
 ### Idea 18 — integer YYYYMMDD date comparison in IsServiceActive (KEPT) ⭐
 Profiling-by-elimination showed the per-candidate `time.Date` constructions

@@ -70,6 +70,9 @@ type feedDecoder struct {
 	newDelays  map[string][]StopDelay
 	newCancels map[string]time.Time
 	newAdds    map[string][]Addition
+	// watched is the configured stop_number set; nil = watch all. Used to drop
+	// ADDED-trip stops outside the board's stops without allocating their id.
+	watched map[string]bool
 
 	stops []rtStop // reused across trips, reset per trip
 
@@ -282,8 +285,14 @@ func (d *feedDecoder) handleAdded(tuBuf, routeID []byte) error {
 		if arrTS == 0 {
 			continue
 		}
-		stopNumber := resolveStopID(d.db, string(stu.stopID))
-		if stopNumber == "" {
+		// Resolve to a watched stop_number without allocating string(stu.stopID)
+		// for stops we don't watch. The feed carries ADDED trips network-wide
+		// (thousands of stop-updates/poll); QueryArrivals only ever reads the
+		// configured stops, and this string conversion was ~94% of the parse's
+		// allocations. The no-copy m[string(b)] lookups don't allocate; the key
+		// is materialised only when an Addition is actually stored.
+		stopNumber, ok := d.resolveWatchedStop(stu.stopID)
+		if !ok {
 			continue
 		}
 		arr := Addition{

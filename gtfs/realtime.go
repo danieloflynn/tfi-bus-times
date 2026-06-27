@@ -189,6 +189,13 @@ type Poller struct {
 	// body outlives the parse — the backing array is safe to recycle next poll.
 	// Poll is single-goroutine, so no synchronisation is needed.
 	readBuf bytes.Buffer
+
+	// watched is the set of configured stop_numbers, used to drop ADDED-trip
+	// stops the board never displays (see handleAdded). Rebuilt only when the
+	// static DB is swapped (watchedFor tracks identity); nil means "watch all"
+	// (no configured filter).
+	watched    map[string]bool
+	watchedFor *StaticDB
 }
 
 // NewPoller creates a Poller for the given GTFS-RT endpoint. db is a holder so
@@ -297,6 +304,19 @@ func (p *Poller) parse(data []byte) error {
 	// background refresh can't make trip lookups inconsistent.
 	db := p.db.Load()
 
+	// Build the watched-stop set once per static-DB swap (not per poll). A nil
+	// set means no configured filter → keep every added stop (watch-all).
+	if p.watchedFor != db {
+		p.watched = nil
+		if len(db.FilterStops) > 0 {
+			p.watched = make(map[string]bool, len(db.FilterStops))
+			for _, s := range db.FilterStops {
+				p.watched[s] = true
+			}
+		}
+		p.watchedFor = db
+	}
+
 	// Size-hint the new maps from the previous parse so the swap rarely has to
 	// grow/rehash them — feed shape is stable poll-to-poll.
 	p.store.mu.RLock()
@@ -323,6 +343,7 @@ func (p *Poller) parse(data []byte) error {
 		// One arena backs all per-trip delay slices this poll; size it from the
 		// previous total so a stable feed reallocates it ~once.
 		delayArena: make([]StopDelay, 0, p.prevDelayTotal),
+		watched:    p.watched,
 	}
 	if err := d.decodeFeed(data); err != nil {
 		return fmt.Errorf("decode feed: %w", err)
@@ -348,6 +369,32 @@ func (p *Poller) parse(data []byte) error {
 		"feed_time", feedTime.Format(time.RFC3339),
 	)
 	return nil
+}
+
+// resolveWatchedStop mirrors resolveStopID but takes the raw []byte stop_id and
+// (a) avoids allocating the string until an Addition will actually be stored,
+// and (b) drops stops outside the watched set (which QueryArrivals never reads).
+// d.watched == nil means "watch all" — every stop is kept, exactly matching the
+// original resolveStopID behaviour. Returns (stopNumber, keep).
+func (d *feedDecoder) resolveWatchedStop(stopID []byte) (string, bool) {
+	// stopID is itself a stop_number (StopNames carries every network stop, so a
+	// match here doesn't imply it's watched — check the watched set).
+	if _, ok := d.db.StopNames[string(stopID)]; ok {
+		if d.watched != nil && !d.watched[string(stopID)] {
+			return "", false
+		}
+		return string(stopID), true
+	}
+	// id→code mapping (e.g. rail). StopIDToNumber is already scoped to watched
+	// stops at build time, so any hit here is by definition watched.
+	if num, ok := d.db.StopIDToNumber[string(stopID)]; ok {
+		return num, true
+	}
+	// Fallback: the raw id (resolveStopID's identity return).
+	if d.watched != nil && !d.watched[string(stopID)] {
+		return "", false
+	}
+	return string(stopID), true
 }
 
 // resolveStopID converts a stop_id from the RT feed to a stop_number.
