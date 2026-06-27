@@ -66,7 +66,7 @@ func renderHD(img *image.Gray, sections []StopSection, now, feedTime time.Time, 
 	clear(img.Pix)
 
 	// Top header: build version on the left, timestamp on the right.
-	headerBaseline := (hdHeaderHeight + fonts.HeaderFace.Metrics().Ascent.Ceil()) / 2
+	headerBaseline := (hdHeaderHeight + fonts.HeaderAscent) / 2
 	if Version != "" {
 		hdDrawText(img, Version, 4, headerBaseline, white, fonts.HeaderFace)
 	}
@@ -81,10 +81,10 @@ func renderHD(img *image.Gray, sections []StopSection, now, feedTime time.Time, 
 	// never change and "M"/"(Sched)" are constant. Computing them once here (not
 	// per arrival row) removes redundant glyph measurement on every refresh and
 	// page tick — the render runs ~every 5 s on the device.
-	bodyAscent := fonts.BodyFace.Metrics().Ascent.Ceil()
-	routeAscent := fonts.RouteFace.Metrics().Ascent.Ceil()
-	smallAscent := fonts.SmallFace.Metrics().Ascent.Ceil()
-	barAscent := fonts.HeaderFace.Metrics().Ascent.Ceil()
+	bodyAscent := fonts.BodyAscent
+	routeAscent := fonts.RouteAscent
+	smallAscent := fonts.SmallAscent
+	barAscent := fonts.HeaderAscent
 	charW := hdMeasureString(fonts.BodyFace, "M")
 	if charW < 1 {
 		charW = 1

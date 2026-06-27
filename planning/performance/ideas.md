@@ -210,10 +210,18 @@ Now that allocation churn is 20–50× lower, raise GOGC (fewer, larger GC cycle
 and set a GOMEMLIMIT soft cap appropriate to the Pi Zero 2W's 512 MB. Non-code
 lever set in `tfi-display.service` Environment.
 
-### 16. ⬜ fonts: precompute face ascents once
+### 16. ✅ fonts: precompute face ascents once
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 16 — precompute font ascents once (KEPT, marginal)
+Exposed `fonts.HeaderAscent/RouteAscent/BodyAscent/SmallAscent` computed at
+init; `renderHD` reads these instead of calling `face.Metrics().Ascent.Ceil()`
+(5 calls/frame removed, on top of idea 9's per-row hoisting). RenderHD/Renderer
+benchmarks unchanged within noise — the frame cost is dominated by the buffer
+clear + glyph rasterization — but it removes redundant per-frame work with no
+downside and is a cleaner contract. Preview output identical.
 
 ### Idea 15 — GOGC/GOMEMLIMIT tuning in the systemd unit (KEPT)
 Added `Environment=GOGC=200` and `Environment=GOMEMLIMIT=350MiB` to
