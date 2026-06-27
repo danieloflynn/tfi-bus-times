@@ -18,6 +18,10 @@ import (
 
 const schemaVer = 3
 
+// gtfsDayNames is the calendar.txt weekday column order (GTFS Monday-first).
+// Package-level so the calendar row callback doesn't allocate it per row.
+var gtfsDayNames = [7]string{"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+
 // StopTime represents one scheduled visit of a trip to a stop.
 type StopTime struct {
 	TripID       string
@@ -278,9 +282,8 @@ func buildFromZIPFile(path string, zipTime time.Time, filterStops []string) (*St
 		if err != nil {
 			return err
 		}
-		dayNames := []string{"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
 		var days [7]bool
-		for i, d := range dayNames {
+		for i, d := range gtfsDayNames {
 			days[i] = row[header[d]] == "1"
 		}
 		db.Services[serviceID] = Service{StartDate: start, EndDate: end, Days: days}
@@ -297,37 +300,26 @@ func buildFromZIPFile(path string, zipTime time.Time, filterStops []string) (*St
 			return err
 		}
 		exType, _ := strconv.Atoi(row[header["exception_type"]])
-		key := serviceID + ":" + date.Format("20060102")
-		db.Exceptions[key] = exType
+		// Build "serviceID:YYYYMMDD" without time.Format (allocation-free append
+		// into a stack buffer); one string alloc for the stored map key remains.
+		// Matches the exact key IsServiceActive reconstructs on the query path.
+		var keyBuf [32]byte
+		kb := append(keyBuf[:0], serviceID...)
+		kb = append(kb, ':')
+		y, mo, dd := date.Date()
+		kb = appendYYYYMMDD(kb, y, int(mo), dd)
+		db.Exceptions[string(kb)] = exType
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("parsing calendar_dates.txt: %w", err)
 	}
 
-	// 5. trips.txt: build tripID → Trip (filtered to trips serving our stops, done after stop_times)
-	// We collect all trips first, then filter based on stop_times.
-	allTrips := make(map[string]struct {
-		routeID   string
-		serviceID string
-		headsign  string
-	})
-	if err := parseCSV(files, "trips.txt", func(header map[string]int, row []string) error {
-		tripID := row[header["trip_id"]]
-		allTrips[tripID] = struct {
-			routeID   string
-			serviceID string
-			headsign  string
-		}{
-			routeID:   row[header["route_id"]],
-			serviceID: row[header["service_id"]],
-			headsign:  row[header["trip_headsign"]],
-		}
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("parsing trips.txt: %w", err)
-	}
-
-	// 6. stop_times.txt: the big one — stream, filter early.
+	// 5. stop_times.txt: the big one — stream, filter early. Parsed *before*
+	// trips.txt so we learn exactly which trips serve our stops and can build
+	// db.Trips directly in step 6, without first buffering every trip in the
+	// network into an intermediate map. On the full TFI feed that allTrips map
+	// (100k+ trips × three strings each) was the build's dominant transient
+	// allocation, almost all of it immediately discarded by the stop filter.
 	// Collect which tripIDs serve our stops.
 	tripsForStops := make(map[string]bool)
 	rowCount := 0
@@ -368,17 +360,23 @@ func buildFromZIPFile(path string, zipTime time.Time, filterStops []string) (*St
 	}
 	slog.Info("parsed stop_times", "rows", rowCount, "kept_trips", len(tripsForStops))
 
-	// Build db.Trips from allTrips, filtered to tripsForStops.
-	for tripID, t := range allTrips {
+	// 6. trips.txt: build db.Trips directly, keeping only trips that serve our
+	// stops (tripsForStops, learned above). When no stop filter is configured
+	// tripsForStops covers every trip, so all are kept — identical to the old
+	// behaviour, but without ever materialising the intermediate allTrips map.
+	if err := parseCSV(files, "trips.txt", func(header map[string]int, row []string) error {
+		tripID := row[header["trip_id"]]
 		if len(tripsForStops) > 0 && !tripsForStops[tripID] {
-			continue
+			return nil
 		}
-		shortName := db.RouteShortNames[t.routeID]
 		db.Trips[tripID] = Trip{
-			RouteShort: shortName,
-			ServiceID:  t.serviceID,
-			Headsign:   t.headsign,
+			RouteShort: db.RouteShortNames[row[header["route_id"]]],
+			ServiceID:  row[header["service_id"]],
+			Headsign:   row[header["trip_headsign"]],
 		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("parsing trips.txt: %w", err)
 	}
 
 	slog.Info("built StaticDB",
@@ -443,20 +441,30 @@ func parseGTFSDate(s string) (time.Time, error) {
 }
 
 // parseGTFSTime parses "HH:MM:SS" (hours may exceed 23 for overnight trips).
+// It locates the two colons by index and parses the three fields from string
+// sub-slices rather than strings.Split, which allocated a []string on every
+// stop_times row — the largest GTFS file (the dominant build allocation source).
 func parseGTFSTime(s string) (int, error) {
-	parts := strings.Split(s, ":")
-	if len(parts) != 3 {
+	c1 := strings.IndexByte(s, ':')
+	if c1 < 0 {
 		return 0, fmt.Errorf("invalid time: %q", s)
 	}
-	h, err := strconv.Atoi(parts[0])
+	c2 := strings.IndexByte(s[c1+1:], ':')
+	if c2 < 0 {
+		return 0, fmt.Errorf("invalid time: %q", s)
+	}
+	c2 += c1 + 1 // make c2 an index into s
+	h, err := strconv.Atoi(s[:c1])
 	if err != nil {
 		return 0, err
 	}
-	m, err := strconv.Atoi(parts[1])
+	m, err := strconv.Atoi(s[c1+1 : c2])
 	if err != nil {
 		return 0, err
 	}
-	ss, err := strconv.Atoi(parts[2])
+	// A third colon (e.g. "10:00:00:00") leaves a non-numeric seconds field, so
+	// Atoi rejects it — matching the old len(parts)==3 check.
+	ss, err := strconv.Atoi(s[c2+1:])
 	if err != nil {
 		return 0, err
 	}

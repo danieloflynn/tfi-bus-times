@@ -1,8 +1,8 @@
 package gtfs
 
 import (
+	"bytes"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -78,6 +78,22 @@ func (ls *LiveStore) DiagLogOnce(key string) bool {
 	return true
 }
 
+// DiagLogOnceBytes is DiagLogOnce for a key held in a (typically stack-allocated)
+// byte buffer. The membership test uses the compiler's no-copy m[string(b)] form,
+// so the already-logged path — the common case on every render once an anomaly
+// has been seen this poll — allocates nothing. The key string is materialised
+// only on the first insert. This keeps QueryArrivals's per-render path
+// allocation-free even when a watched stop has additions to diagnose.
+func (ls *LiveStore) DiagLogOnceBytes(key []byte) bool {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ls.diagLogged[string(key)] {
+		return false
+	}
+	ls.diagLogged[string(key)] = true
+	return true
+}
+
 // FeedTime returns the feed header timestamp from the last successful parse.
 func (s *LiveStore) FeedTime() time.Time {
 	s.mu.RLock()
@@ -97,13 +113,16 @@ func (s *LiveStore) PollTime() time.Time {
 func (ls *LiveStore) GetDelay(tripID string, stopSequence int) (StopDelay, bool) {
 	ls.mu.RLock()
 	defer ls.mu.RUnlock()
+	return searchDelay(ls.Delays[tripID], stopSequence)
+}
 
-	delays, ok := ls.Delays[tripID]
-	if !ok || len(delays) == 0 {
+// searchDelay finds the StopDelay with the largest StopSequence ≤ stopSequence
+// in a slice sorted ascending by StopSequence. Shared by GetDelay (which holds
+// the lock) and QueryArrivals's lock-free snapshot path.
+func searchDelay(delays []StopDelay, stopSequence int) (StopDelay, bool) {
+	if len(delays) == 0 {
 		return StopDelay{}, false
 	}
-
-	// Binary search: find the largest StopSequence ≤ stopSequence.
 	lo, hi := 0, len(delays)-1
 	for lo <= hi {
 		mid := (lo + hi) / 2
@@ -121,6 +140,30 @@ func (ls *LiveStore) GetDelay(tripID string, stopSequence int) (StopDelay, bool)
 		return StopDelay{}, false
 	}
 	return delays[lo-1], true
+}
+
+// liveSnapshot is an immutable view of the realtime maps captured under a single
+// RLock. Each parse replaces these maps wholesale (they are never mutated in
+// place after the atomic swap), so once captured they are safe to read lock-free
+// for the remainder of a query. QueryArrivals uses this to avoid taking the
+// RWMutex once per candidate stop-time (it previously called IsCancelled +
+// GetDelay — two RLock/RUnlock pairs — for every candidate on every render).
+type liveSnapshot struct {
+	delays  map[string][]StopDelay
+	cancels map[string]time.Time
+	adds    map[string][]Addition
+	now     time.Time
+}
+
+func (ls *LiveStore) snapshot() liveSnapshot {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+	return liveSnapshot{
+		delays:  ls.Delays,
+		cancels: ls.Cancellations,
+		adds:    ls.Additions,
+		now:     ls.now(),
+	}
 }
 
 // IsCancelled returns true if tripID was cancelled within the last 24 hours.
@@ -154,6 +197,25 @@ type Poller struct {
 	store *LiveStore
 
 	rateLimitCount int
+	// prevDelayTotal is the total StopDelay count from the previous parse, used
+	// to size the decoder's delay arena so a stable feed reallocates it ~once.
+	prevDelayTotal int
+	// stopsScratch is the decoder's per-trip StopTimeUpdate scratch, retained
+	// across polls so it reaches steady-state capacity once instead of regrowing
+	// every poll. Single-goroutine (Poll), so no synchronisation needed.
+	stopsScratch []rtStop
+	// readBuf is reused across polls to hold the raw feed body (~776 KB). parse
+	// copies out (string(...)) every value it retains, so no sub-slice of the
+	// body outlives the parse — the backing array is safe to recycle next poll.
+	// Poll is single-goroutine, so no synchronisation is needed.
+	readBuf bytes.Buffer
+
+	// watched is the set of configured stop_numbers, used to drop ADDED-trip
+	// stops the board never displays (see handleAdded). Rebuilt only when the
+	// static DB is swapped (watchedFor tracks identity); nil means "watch all"
+	// (no configured filter).
+	watched    map[string]bool
+	watchedFor *StaticDB
 }
 
 // NewPoller creates a Poller for the given GTFS-RT endpoint. db is a holder so
@@ -220,7 +282,15 @@ func (p *Poller) fetch() ([]byte, error) {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	// Reuse the buffer's backing array across polls: Reset keeps the capacity,
+	// so after the first poll the ~776 KB read does no fresh allocation. Safe
+	// because parse retains no sub-slice of the returned bytes (see readBuf).
+	p.readBuf.Reset()
+	if _, err := p.readBuf.ReadFrom(resp.Body); err != nil {
+		slog.Error("realtime read body", "err", err)
+		return nil, err
+	}
+	return p.readBuf.Bytes(), nil
 }
 
 // BackoffDuration returns the exponential backoff duration for the current rate
@@ -254,6 +324,19 @@ func (p *Poller) parse(data []byte) error {
 	// background refresh can't make trip lookups inconsistent.
 	db := p.db.Load()
 
+	// Build the watched-stop set once per static-DB swap (not per poll). A nil
+	// set means no configured filter → keep every added stop (watch-all).
+	if p.watchedFor != db {
+		p.watched = nil
+		if len(db.FilterStops) > 0 {
+			p.watched = make(map[string]bool, len(db.FilterStops))
+			for _, s := range db.FilterStops {
+				p.watched[s] = true
+			}
+		}
+		p.watchedFor = db
+	}
+
 	// Size-hint the new maps from the previous parse so the swap rarely has to
 	// grow/rehash them — feed shape is stable poll-to-poll.
 	p.store.mu.RLock()
@@ -277,10 +360,19 @@ func (p *Poller) parse(data []byte) error {
 		// old proto path's time.Unix(0, 0). decodeHeader overwrites this from the
 		// real header, which precedes the entities on the wire.
 		feedTime: time.Unix(0, 0),
+		// One arena backs all per-trip delay slices this poll; size it from the
+		// previous total so a stable feed reallocates it ~once.
+		delayArena: make([]StopDelay, 0, p.prevDelayTotal),
+		watched:    p.watched,
+		// Reuse the StopTimeUpdate scratch across polls (collectStops resets it
+		// per trip); it reaches steady-state capacity once.
+		stops: p.stopsScratch[:0],
 	}
 	if err := d.decodeFeed(data); err != nil {
 		return fmt.Errorf("decode feed: %w", err)
 	}
+	p.prevDelayTotal = len(d.delayArena)
+	p.stopsScratch = d.stops // retain grown backing for the next poll
 
 	feedTime := d.feedTime
 
@@ -301,6 +393,32 @@ func (p *Poller) parse(data []byte) error {
 		"feed_time", feedTime.Format(time.RFC3339),
 	)
 	return nil
+}
+
+// resolveWatchedStop mirrors resolveStopID but takes the raw []byte stop_id and
+// (a) avoids allocating the string until an Addition will actually be stored,
+// and (b) drops stops outside the watched set (which QueryArrivals never reads).
+// d.watched == nil means "watch all" — every stop is kept, exactly matching the
+// original resolveStopID behaviour. Returns (stopNumber, keep).
+func (d *feedDecoder) resolveWatchedStop(stopID []byte) (string, bool) {
+	// stopID is itself a stop_number (StopNames carries every network stop, so a
+	// match here doesn't imply it's watched — check the watched set).
+	if _, ok := d.db.StopNames[string(stopID)]; ok {
+		if d.watched != nil && !d.watched[string(stopID)] {
+			return "", false
+		}
+		return string(stopID), true
+	}
+	// id→code mapping (e.g. rail). StopIDToNumber is already scoped to watched
+	// stops at build time, so any hit here is by definition watched.
+	if num, ok := d.db.StopIDToNumber[string(stopID)]; ok {
+		return num, true
+	}
+	// Fallback: the raw id (resolveStopID's identity return).
+	if d.watched != nil && !d.watched[string(stopID)] {
+		return "", false
+	}
+	return string(stopID), true
 }
 
 // resolveStopID converts a stop_id from the RT feed to a stop_number.

@@ -35,6 +35,37 @@ func BenchmarkFuzzBench_QueryArrivals(b *testing.B) {
 	}
 }
 
+// BenchmarkFuzzBench_QueryArrivalsReuse measures the query when the caller feeds
+// back a per-stop scratch slice (as the render loop does), so the arrivals
+// backing array is reused across calls instead of allocated each render.
+func BenchmarkFuzzBench_QueryArrivalsReuse(b *testing.B) {
+	db, err := BuildFromZIPFile("testdata/gtfs_static.zip", fixtureStops())
+	if err != nil {
+		b.Fatalf("loading fixture db: %v", err)
+	}
+	rawFeed, err := os.ReadFile("testdata/tripupdates.gtfsr")
+	if err != nil {
+		b.Fatalf("reading fixture feed: %v", err)
+	}
+	poller := NewPoller("", "", NewDB(db))
+	withClock(poller.Store(), fixtureNow())
+	if err := poller.parse(rawFeed); err != nil {
+		b.Fatalf("parse fixture feed: %v", err)
+	}
+	store := poller.Store()
+	now := fixtureNow()
+	stops := fixtureStops()
+	scratch := make([][]Arrival, len(stops))
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for si, stop := range stops {
+			scratch[si] = QueryArrivalsInto(scratch[si], db, store, stop, now, 90, 0, nil)
+		}
+	}
+}
+
 // BenchmarkFuzzBench_PollerParse measures Poller.parse against the full
 // captured realtime feed (776 KB, 2857 entities, 15666 stop_time_updates).
 func BenchmarkFuzzBench_PollerParse(b *testing.B) {

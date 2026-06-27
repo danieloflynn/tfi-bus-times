@@ -25,6 +25,17 @@ var (
 	TinyFace font.Face
 )
 
+// Precomputed ceil'd ascents for the faces the HD renderer baselines against.
+// The faces are immutable, so deriving these once at init lets the render loop
+// (~every 5 s on the device) read a constant instead of calling
+// face.Metrics().Ascent.Ceil() on every frame.
+var (
+	HeaderAscent int
+	RouteAscent  int
+	BodyAscent   int
+	SmallAscent  int
+)
+
 func init() {
 	f, err := opentype.Parse(atkinsonBoldTTF)
 	if err != nil {
@@ -35,6 +46,11 @@ func init() {
 	BodyFace   = mustFace(f, 16)
 	SmallFace  = mustFace(f, 18)
 	TinyFace   = mustFace(f, 10)
+
+	HeaderAscent = HeaderFace.Metrics().Ascent.Ceil()
+	RouteAscent = RouteFace.Metrics().Ascent.Ceil()
+	BodyAscent = BodyFace.Metrics().Ascent.Ceil()
+	SmallAscent = SmallFace.Metrics().Ascent.Ceil()
 }
 
 func mustFace(f *opentype.Font, size float64) font.Face {

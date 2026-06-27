@@ -70,8 +70,21 @@ type feedDecoder struct {
 	newDelays  map[string][]StopDelay
 	newCancels map[string]time.Time
 	newAdds    map[string][]Addition
+	// watched is the configured stop_number set; nil = watch all. Used to drop
+	// ADDED-trip stops outside the board's stops without allocating their id.
+	watched map[string]bool
 
 	stops []rtStop // reused across trips, reset per trip
+
+	// delayArena backs every scheduled trip's []StopDelay for this poll. Rather
+	// than make() a fresh slice per trip (~1285 small allocations/poll), each
+	// trip appends into this one arena and is handed a 3-arg-capped sub-slice.
+	// Appends that grow the arena copy forward, but slices already handed out
+	// reference whichever backing array was current when taken and stay valid
+	// (the swap map keeps that array alive); the cap pin stops a stored slice
+	// from ever appending into a neighbour. Pre-sized from the previous poll's
+	// total, so a stable feed reallocates ~once.
+	delayArena []StopDelay
 
 	nUpdates, nAdded, nCancelled, nUnknown int
 }
@@ -207,6 +220,17 @@ func (d *feedDecoder) decodeTripUpdate(b []byte) error {
 
 	switch int(rel) {
 	case tripCancelled:
+		// Only record cancellations for trips that serve a watched stop (present
+		// in db.Trips, which is built filtered to those trips). QueryArrivals only
+		// ever looks up cancellations for such trips, so storing the rest — the
+		// feed cancels network-wide — is pure waste (a string alloc per cancelled
+		// trip). watched == nil means no configured filter (watch-all): keep every
+		// one, as the LiveStore carry-over contract tests expect.
+		if d.watched != nil {
+			if _, ok := d.db.Trips[string(tripID)]; !ok {
+				return nil
+			}
+		}
 		d.newCancels[string(tripID)] = d.feedTime
 		d.nCancelled++
 		return nil
@@ -224,7 +248,7 @@ func (d *feedDecoder) decodeTripUpdate(b []byte) error {
 		return err
 	}
 
-	delays := make([]StopDelay, 0, len(d.stops))
+	start := len(d.delayArena)
 	for i := range d.stops {
 		stu := &d.stops[i]
 		if int(stu.rel) == stopSkipped {
@@ -241,10 +265,13 @@ func (d *feedDecoder) decodeTripUpdate(b []byte) error {
 			}
 			sd.DelaySeconds = dl
 		}
-		delays = append(delays, sd)
+		d.delayArena = append(d.delayArena, sd)
 		d.nUpdates++
 	}
-	if len(delays) > 0 {
+	if end := len(d.delayArena); end > start {
+		// Cap the sub-slice at its length so the stored slice can never append
+		// into the next trip's region of the arena.
+		delays := d.delayArena[start:end:end]
 		sortStopDelays(delays)
 		d.newDelays[string(tripID)] = delays
 	}
@@ -254,10 +281,14 @@ func (d *feedDecoder) decodeTripUpdate(b []byte) error {
 // handleAdded reproduces the ADDED-trip stop handling from parse: each stop
 // becomes an Addition keyed by resolved stop number, with per-route dedup.
 func (d *feedDecoder) handleAdded(tuBuf, routeID []byte) error {
-	routeShort, routeResolved := routeShortName(d.db, string(routeID))
 	if err := d.collectStops(tuBuf); err != nil {
 		return err
 	}
+	// Resolve the route lazily, only once a watched stop is actually found:
+	// added trips are network-wide and most serve none of our stops, so
+	// allocating string(routeID) upfront for every one was wasted work.
+	var routeShort string
+	var routeResolved, routeDone bool
 	for i := range d.stops {
 		stu := &d.stops[i]
 		// Prefer arrival, fall back to departure: added stops sometimes carry
@@ -269,9 +300,19 @@ func (d *feedDecoder) handleAdded(tuBuf, routeID []byte) error {
 		if arrTS == 0 {
 			continue
 		}
-		stopNumber := resolveStopID(d.db, string(stu.stopID))
-		if stopNumber == "" {
+		// Resolve to a watched stop_number without allocating string(stu.stopID)
+		// for stops we don't watch. The feed carries ADDED trips network-wide
+		// (thousands of stop-updates/poll); QueryArrivals only ever reads the
+		// configured stops, and this string conversion was ~94% of the parse's
+		// allocations. The no-copy m[string(b)] lookups don't allocate; the key
+		// is materialised only when an Addition is actually stored.
+		stopNumber, ok := d.resolveWatchedStop(stu.stopID)
+		if !ok {
 			continue
+		}
+		if !routeDone {
+			routeShort, routeResolved = routeShortName(d.db, string(routeID))
+			routeDone = true
 		}
 		arr := Addition{
 			RouteShortName: routeShort,
