@@ -55,9 +55,19 @@ Status legend: ⬜ untried · 🔬 in progress · ✅ kept (committed) · ❌ re
 - If keeping `proto.Unmarshal`, reuse a single `FeedMessage` via `Reset()` so the
   backing arrays are recycled instead of re-allocated each poll.
 
-### 4. ⬜ QueryArrivals allocation reduction
+### 4. ✅ QueryArrivals allocation reduction (part 1)
 - 685 allocs per call, called every few seconds. Inspect for per-call slice/map
   allocations that could be pooled or preallocated.
+- Done: array-backed `[24]bool`/`[24]int` hour scan (was map+slice),
+  `slices.SortFunc` (was `sort.Slice`), struct dedup key (was
+  `RouteShort+ScheduledTime.String()`).
+- Result: 685→598 allocs (-13%), 16,312→13,912 B (-15%), ~2.5% faster.
+
+### 4b. ⬜ QueryArrivals: kill IsServiceActive per-candidate allocations
+- `IsServiceActive` runs per candidate stop-time and does
+  `serviceID + ":" + date.Format("20060102")` — a time-format + string concat
+  allocation on every call. Restructure the exceptions key / date handling to
+  avoid the formatting and concatenation on the hot path.
 
 ### 5. ⬜ RenderHD allocation / buffer reuse
 - 615 KB per render. Check whether the image buffer and intermediate draws can be
@@ -101,3 +111,13 @@ Validated by the full gtfs suite incl. the golden end-to-end behaviour lock
 (identical observable arrivals) and 13k fuzz execs with no panic. This is the
 poll-cadence hot path (every 60 s on the device), so it directly removes the
 dominant GC-pressure and CPU source.
+
+### Idea 4 part 1 — QueryArrivals cheap allocation wins (KEPT)
+Array-backed hour scan, `slices.SortFunc`, struct dedup key (no
+`ScheduledTime.String()`).
+
+| Benchmark     | ns/op (b→a)        | B/op (b→a)      | allocs (b→a) |
+| ------------- | ------------------ | --------------- | ------------ |
+| QueryArrivals | 204,305 → 199,000  | 16,312 → 13,912 | 685 → 598    |
+
+QueryArrivals runs on every render + page tick (~every 5 s on the device).

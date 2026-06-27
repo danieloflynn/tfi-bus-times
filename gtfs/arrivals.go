@@ -2,7 +2,7 @@ package gtfs
 
 import (
 	"log/slog"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -97,9 +97,12 @@ func QueryArrivals(
 	// never applied, and the arrival vanished — exactly what happens during major
 	// disruptions. Scanning a few extra buckets is sub-millisecond.
 	extraHours := maxMinutes/60 + 2
-	var tryHours []int
 	startHour := ((now.Hour()-lookbackHours)%24 + 24) % 24
-	seen := make(map[int]bool)
+	// Hours are 0–23, so a fixed [24] array backs both the dedup set and the
+	// result slice — no map/slice heap allocation on this per-render hot path.
+	var seen [24]bool
+	var hoursArr [24]int
+	tryHours := hoursArr[:0]
 	for i := 0; i <= lookbackHours+extraHours+1; i++ {
 		h := (startHour + i) % 24
 		if !seen[h] {
@@ -232,19 +235,26 @@ func QueryArrivals(
 		})
 	}
 
-	// Deduplicate: same tripID can appear in multiple hour buckets.
-	seen2 := make(map[string]bool)
+	// Deduplicate: same tripID can appear in multiple hour buckets. Key on a
+	// small struct {route, scheduled-unix} instead of a formatted string so the
+	// per-arrival ScheduledTime.String() allocation is avoided.
+	type dedupKey struct {
+		route string
+		unix  int64
+	}
+	seen2 := make(map[dedupKey]bool, len(arrivals))
 	deduped := arrivals[:0]
 	for _, a := range arrivals {
-		key := a.RouteShort + "|" + a.ScheduledTime.String()
+		key := dedupKey{a.RouteShort, a.ScheduledTime.Unix()}
 		if !seen2[key] {
 			seen2[key] = true
 			deduped = append(deduped, a)
 		}
 	}
 
-	sort.Slice(deduped, func(i, j int) bool {
-		return deduped[i].EffectiveTime().Before(deduped[j].EffectiveTime())
+	// slices.SortFunc avoids sort.Slice's reflection + closure-escape overhead.
+	slices.SortFunc(deduped, func(a, b Arrival) int {
+		return a.EffectiveTime().Compare(b.EffectiveTime())
 	})
 	return deduped
 }
