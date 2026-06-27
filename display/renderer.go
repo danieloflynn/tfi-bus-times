@@ -282,12 +282,27 @@ func padRoute(r string) string {
 }
 
 // truncate cuts s to at most maxRunes runes, appending "…" if truncated.
+// It walks the string's runes by byte offset instead of materialising a []rune
+// (the old form allocated a rune slice plus two strings on every truncation —
+// per headsign, per row, per frame). The fitting case allocates nothing; a
+// truncation allocates only the single result string.
 func truncate(s string, maxRunes int) string {
-	if utf8.RuneCountInString(s) <= maxRunes {
-		return s
+	if maxRunes <= 0 {
+		return ""
 	}
-	runes := []rune(s)
-	return string(runes[:maxRunes-1]) + "…"
+	n := 0
+	cutoff := -1 // byte offset after the first (maxRunes-1) runes
+	for i := range s {
+		if n == maxRunes-1 {
+			cutoff = i
+		}
+		n++
+		if n > maxRunes {
+			// More than maxRunes runes — keep the first maxRunes-1 and ellipsis.
+			return s[:cutoff] + "…"
+		}
+	}
+	return s // fits in maxRunes runes
 }
 
 func maxMins(_ time.Time) int { return 90 }

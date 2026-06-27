@@ -193,6 +193,13 @@ Now caller-owned (allocated once in main before the loop) and filled in place,
 so the page-tick render allocates nothing for the section list. Small (one slice
 header/frame) but free and on the page-tick cadence.
 
+### 27. ✅ renderer: allocation-light truncate (no []rune)
+`truncate` allocated a `[]rune` plus two strings on every truncation — and the
+HD renderer truncates headsigns per row, per frame. Rewrote it to walk runes by
+byte offset (range over string) and slice the original; the fitting case
+allocates nothing and a truncation allocates only the one result string (3
+allocs → 1). Added a rune-aware unit test (incl. multibyte) locking behaviour.
+
 ### 26. ✅ static build: parse stop_times before trips (drop the allTrips buffer)
 The build buffered every network trip into an intermediate `allTrips` map, then
 filtered to stops. Reordered so stop_times (which yields the watched-trip set) is
@@ -309,6 +316,11 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 27 — allocation-light truncate (KEPT)
+Walk runes by byte offset instead of `[]rune(s)`; 3 allocs → 1 per truncated
+headsign (0 when it fits), on the per-row/per-frame HD render path. New
+multibyte-safe unit test.
 
 ### Idea 26 — parse stop_times before trips in the static build (KEPT)
 Eliminated the intermediate `allTrips` map by learning the watched-trip set from
