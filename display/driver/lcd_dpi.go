@@ -120,12 +120,18 @@ func (d *LCDDPI) DisplayFrame(img *image.Gray) error {
 	return nil
 }
 
-// writeRGB565 packs each gray pixel into a 16-bit RGB565 value.
+// writeRGB565 packs each gray pixel into a 16-bit RGB565 value. It walks the
+// image's Pix bytes row by row rather than calling GrayAt per pixel — GrayAt
+// recomputes a PixOffset (a multiply) and bounds-checks on every one of the
+// ~614k pixels each frame. Per-row slicing lets the inner loop range over a
+// contiguous []byte with no method-call or offset-math overhead.
 func (d *LCDDPI) writeRGB565(img *image.Gray, bounds image.Rectangle) {
+	w := bounds.Dx()
 	idx := 0
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			g := img.GrayAt(x, y).Y
+		rowStart := img.PixOffset(bounds.Min.X, y)
+		row := img.Pix[rowStart : rowStart+w]
+		for _, g := range row {
 			r5 := uint16(g >> 3)
 			g6 := uint16(g) * 63 / 255
 			b5 := r5
@@ -138,14 +144,17 @@ func (d *LCDDPI) writeRGB565(img *image.Gray, bounds image.Rectangle) {
 }
 
 // writeXRGB8888 writes each gray pixel as a 32-bit XRGB8888 value (little-endian).
+// Uses the same per-row Pix walk as writeRGB565 to avoid per-pixel GrayAt cost.
 func (d *LCDDPI) writeXRGB8888(img *image.Gray, bounds image.Rectangle) {
+	w := bounds.Dx()
 	idx := 0
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			g := img.GrayAt(x, y).Y
-			d.buf[idx] = g    // B
-			d.buf[idx+1] = g  // G
-			d.buf[idx+2] = g  // R
+		rowStart := img.PixOffset(bounds.Min.X, y)
+		row := img.Pix[rowStart : rowStart+w]
+		for _, g := range row {
+			d.buf[idx] = g      // B
+			d.buf[idx+1] = g    // G
+			d.buf[idx+2] = g    // R
 			d.buf[idx+3] = 0xFF // A/X — set fully opaque in case format is ARGB
 			idx += 4
 		}
