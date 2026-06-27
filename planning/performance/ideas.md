@@ -179,11 +179,13 @@ Removes per-candidate lock traffic and contention with the poller goroutine.
 Kept — race-clean, golden lock holds. (≈2% faster in the single-threaded bench;
 larger benefit on-device where the poller contends for the lock.)
 
-### 18. ⬜ IsServiceActive: integer YYYYMMDD date compare (schema bump)
-`IsServiceActive` builds two `time.Date` values per candidate to normalise the
-service start/end for range comparison. Store the service window as int YYYYMMDD
-at build time and compare integers, dropping the per-candidate `time.Date`
-constructions on the hottest path. Requires a `schemaVer` bump (cache rebuild).
+### 18. ✅ IsServiceActive: integer YYYYMMDD date compare ⭐
+`IsServiceActive` built **three** `time.Date` values per candidate (midnight
+normalisation of dt + service start + service end) for the range check — and
+`time.Date` does full timezone normalisation, which turned out to dominate the
+query's CPU. Replaced with `Date()` accessors + packed-int YYYYMMDD comparison.
+No schema bump needed (computed inline from the existing time.Time fields).
+**QueryArrivals ~140µs → ~82µs (1.7× faster).**
 
 ### 19. ⬜ renderAndDisplay: reuse the per-frame sections slice
 `renderAndDisplay` allocates `make([]StopSection, len(stops))` every frame.
@@ -234,6 +236,21 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 18 — integer YYYYMMDD date comparison in IsServiceActive (KEPT) ⭐
+Profiling-by-elimination showed the per-candidate `time.Date` constructions
+(three of them: dt midnight + service start + service end) dominated
+QueryArrivals CPU — `time.Date` does full timezone normalisation. Replaced with
+`time.Time.Date()` field accessors and packed-int YYYYMMDD ordering (zero-padded
+YYYYMMDD compares identically to calendar order). `dt.Weekday()` is used
+directly since weekday is independent of the time-of-day component.
+
+| Benchmark     | ns/op (b→a)        | allocs |
+| ------------- | ------------------ | ------ |
+| QueryArrivals | ~140,000 → ~82,000 | 13 (unchanged) |
+
+**1.7× faster** on the per-render/page-tick hot path, no schema bump, golden
+lock + all calendar/service edge tests pass.
 
 ### Idea 17 — snapshot LiveStore maps once per query (KEPT)
 Added `LiveStore.snapshot()` (one RLock → map references + clock) and

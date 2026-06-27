@@ -48,9 +48,11 @@ func (a Arrival) MinutesUntil(now time.Time) int {
 // portion of dt. It applies calendar_dates exceptions (type 1 = force on,
 // type 2 = force off).
 func IsServiceActive(db *StaticDB, serviceID string, dt time.Time) bool {
-	// Normalise to date-only (midnight) in the same timezone so that range
-	// comparisons work regardless of the time-of-day component in dt.
-	date := time.Date(dt.Year(), dt.Month(), dt.Day(), 0, 0, 0, 0, dt.Location())
+	// Calendar date of dt in its own location. Date() is a cheap field accessor
+	// (no Time construction); the time-of-day component is irrelevant to both the
+	// exception lookup and the start/end range check, so no midnight-normalising
+	// time.Date is needed.
+	y, mo, d := dt.Date()
 
 	// Build "serviceID:YYYYMMDD" in a stack buffer and look it up via
 	// m[string(b)] — the compiler elides the []byte→string copy, so this hot
@@ -60,7 +62,6 @@ func IsServiceActive(db *StaticDB, serviceID string, dt time.Time) bool {
 	kb := keyBuf[:0]
 	kb = append(kb, serviceID...)
 	kb = append(kb, ':')
-	y, mo, d := date.Date()
 	kb = appendYYYYMMDD(kb, y, int(mo), d)
 	if ex, ok := db.Exceptions[string(kb)]; ok {
 		return ex == 1 // 1 = added, 2 = removed
@@ -69,15 +70,22 @@ func IsServiceActive(db *StaticDB, serviceID string, dt time.Time) bool {
 	if !ok {
 		return false
 	}
-	// Normalise service dates too (they are stored as midnight UTC).
-	start := time.Date(svc.StartDate.Year(), svc.StartDate.Month(), svc.StartDate.Day(), 0, 0, 0, 0, date.Location())
-	end := time.Date(svc.EndDate.Year(), svc.EndDate.Month(), svc.EndDate.Day(), 0, 0, 0, 0, date.Location())
-	if date.Before(start) || date.After(end) {
+	// Compare calendar dates as packed YYYYMMDD integers. This drops the two
+	// per-candidate time.Date constructions the old range check used to normalise
+	// the service start/end — Date() just reads the stored fields, and integer
+	// ordering matches calendar ordering for zero-padded YYYYMMDD.
+	ymd := y*10000 + int(mo)*100 + d
+	sy, sm, sd := svc.StartDate.Date()
+	ey, em, ed := svc.EndDate.Date()
+	startYMD := sy*10000 + int(sm)*100 + sd
+	endYMD := ey*10000 + int(em)*100 + ed
+	if ymd < startYMD || ymd > endYMD {
 		return false
 	}
 	// GTFS weekday: Monday=0 … Sunday=6. Go's time.Weekday: Sunday=0, Monday=1, …
-	// Convert: (go_weekday + 6) % 7 gives GTFS index.
-	idx := (int(date.Weekday()) + 6) % 7
+	// Convert: (go_weekday + 6) % 7 gives GTFS index. Weekday is unaffected by the
+	// time-of-day component, so dt.Weekday() equals the normalised date's.
+	idx := (int(dt.Weekday()) + 6) % 7
 	return svc.Days[idx]
 }
 
