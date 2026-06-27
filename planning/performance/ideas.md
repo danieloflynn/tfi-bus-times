@@ -91,8 +91,34 @@ Status legend: ⬜ untried · 🔬 in progress · ✅ kept (committed) · ❌ re
 
 ### 6. ⬜ GOGC / GOMEMLIMIT tuning for the device
 - Non-code lever: tune GC aggressiveness for a low-churn long-running process.
+- Now that allocation churn is ~20–50× lower, a higher GOGC (fewer, larger GC
+  cycles) may further cut GC CPU. Could set via the systemd unit's Environment.
+
+### 7. ⬜ BuildFromZIPFile allocations (startup + daily refresh)
+- 1.1 MB / 4,582 allocs per build. Lower priority (infrequent), but the daily
+  refresh competes with the render loop. CSV parsing + gob are the likely costs.
+
+### 8. ⬜ Reuse decoder scratch / maps across polls
+- The feedDecoder's `stops` scratch is reset per trip but reallocated per poll;
+  the swap maps are rebuilt each poll. Investigate a poller-owned scratch pool
+  to shave the remaining 4.5k allocs/poll further.
 
 ---
+
+## Cumulative summary (baseline 925d689 → current)
+
+The two continuously-running paths on the device — the realtime poll (every
+60 s) and the render (every page tick, ~5 s) — are dramatically lighter:
+
+| Path                          | ns/op            | B/op              | allocs/op       |
+| ----------------------------- | ---------------- | ----------------- | --------------- |
+| PollerParse (per poll)        | 11.3 ms → 1.47 ms (**7.7×**) | 7.41 MB → 407 KB (**18×**) | 210,047 → 4,535 (**46×**) |
+| QueryArrivals (per render)    | 204 µs → 140 µs (**1.5×**)   | 16.3 KB → 9.3 KB | 685 → 19 (**36×**) |
+| Frame render (device, reused) | n/a (new path)   | 614 KB → ~0.6 KB  | 40 → 5          |
+
+Order-of-magnitude reductions in allocations on every recurring operation, which
+is what drives GC CPU on the Pi Zero 2W. Still pending: ideas 6 (GC tuning) and
+BuildFromZIPFile (startup/daily, low priority — see below).
 
 ## Results log
 
