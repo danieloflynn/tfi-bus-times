@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -266,13 +266,13 @@ func (p *Poller) parse(data []byte) error {
 	}
 	feedTime := time.Unix(feedTS, 0)
 
-	// We build new maps and swap them atomically to avoid partial updates.
-	newDelays := make(map[string][]StopDelay)
-	newCancels := make(map[string]time.Time)
-	newAdds := make(map[string][]Addition)
-
-	// Preserve old cancellations that are still within 24h.
+	// Size-hint the new maps from the previous parse so the swap rarely has to
+	// grow/rehash them — feed shape is stable poll-to-poll.
 	p.store.mu.RLock()
+	newDelays := make(map[string][]StopDelay, len(p.store.Delays))
+	newCancels := make(map[string]time.Time, len(p.store.Cancellations))
+	newAdds := make(map[string][]Addition, len(p.store.Additions))
+	// Preserve old cancellations that are still within 24h.
 	for id, t := range p.store.Cancellations {
 		if p.store.now().Sub(t) < 24*time.Hour {
 			newCancels[id] = t
@@ -343,7 +343,9 @@ func (p *Poller) parse(data []byte) error {
 			continue
 		}
 
-		var delays []StopDelay
+		// Preallocate to the upper bound (one delay per stop update) so the
+		// append loop never reallocates the backing array mid-trip.
+		delays := make([]StopDelay, 0, len(tu.StopTimeUpdate))
 		for _, stu := range tu.StopTimeUpdate {
 			if int(stu.GetScheduleRelationship()) == stopSkipped {
 				continue
@@ -367,9 +369,10 @@ func (p *Poller) parse(data []byte) error {
 		}
 
 		if len(delays) > 0 {
-			// Sort by StopSequence for binary search later.
-			sort.Slice(delays, func(i, j int) bool {
-				return delays[i].StopSequence < delays[j].StopSequence
+			// Sort by StopSequence for binary search later. slices.SortFunc
+			// avoids the reflection and closure-escape overhead of sort.Slice.
+			slices.SortFunc(delays, func(a, b StopDelay) int {
+				return int(a.StopSequence - b.StopSequence)
 			})
 			newDelays[tripID] = delays
 		}
