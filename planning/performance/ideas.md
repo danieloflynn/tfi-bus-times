@@ -69,9 +69,18 @@ Status legend: ⬜ untried · 🔬 in progress · ✅ kept (committed) · ❌ re
   allocation on every call. Restructure the exceptions key / date handling to
   avoid the formatting and concatenation on the hot path.
 
-### 5. ⬜ RenderHD allocation / buffer reuse
-- 615 KB per render. Check whether the image buffer and intermediate draws can be
-  reused across frames instead of freshly allocated.
+### 5a. ✅ RenderHD: cache uniform draw sources
+- Each `font.Drawer.DrawString` allocated a fresh `image.NewUniform(c)`. Cache
+  the two colours actually used (black/white) as package-level `*image.Uniform`
+  via `grayUniform`. Result: RenderHD 40→11 allocs (-72%); also applied to the
+  small-display `drawText`. Image bytes/CPU unchanged (dominated by the buffer +
+  font rendering).
+
+### 5b. ⬜ RenderHD: reuse the image buffer across frames
+- The 614 KB `image.NewGray` is allocated every frame (every page tick, ~5 s).
+  Reusing one buffer would eliminate ~440 MB/hr of GC churn. Needs care: the
+  driver must finish consuming the frame before it is overwritten. Check
+  `DisplayFrame` copies pixels synchronously first.
 
 ### 6. ⬜ GOGC / GOMEMLIMIT tuning for the device
 - Non-code lever: tune GC aggressiveness for a low-churn long-running process.

@@ -49,7 +49,28 @@ const (
 var (
 	black = color.Gray{Y: 0x00}
 	white = color.Gray{Y: 0xFF}
+
+	// Cached, immutable uniform sources for the only two colours the board
+	// draws. font.Drawer needs a Src image; allocating a fresh image.NewUniform
+	// for every DrawString was the bulk of the renderer's per-frame allocations
+	// (a frame is redrawn every page tick). *image.Uniform is read-only, so
+	// sharing one instance per colour is safe across calls and goroutines.
+	srcBlack = image.NewUniform(black)
+	srcWhite = image.NewUniform(white)
 )
+
+// grayUniform returns a cached uniform source for black/white (the only colours
+// used) and falls back to a fresh allocation for any other colour.
+func grayUniform(c color.Gray) *image.Uniform {
+	switch c.Y {
+	case 0x00:
+		return srcBlack
+	case 0xFF:
+		return srcWhite
+	default:
+		return image.NewUniform(c)
+	}
+}
 
 // hdMinWidth is the threshold above which the HD layout is used.
 const hdMinWidth = 800
@@ -159,7 +180,7 @@ const epd29MinWidth = 290 // treat displays ≥ 290px wide as 2.9" layout
 func drawText(img *image.Gray, s string, x, baseline int, c color.Gray) {
 	d := &font.Drawer{
 		Dst:  img,
-		Src:  image.NewUniform(c),
+		Src:  grayUniform(c),
 		Face: basicfont.Face7x13,
 		Dot:  fixed.P(x, baseline),
 	}

@@ -184,7 +184,7 @@ func renderHD(sections []StopSection, now, feedTime time.Time, width, height int
 func hdDrawText(img *image.Gray, s string, x, baseline int, c color.Gray, face font.Face) {
 	d := &font.Drawer{
 		Dst:  img,
-		Src:  image.NewUniform(c),
+		Src:  grayUniform(c),
 		Face: face,
 		Dot:  fixed.P(x, baseline),
 	}
