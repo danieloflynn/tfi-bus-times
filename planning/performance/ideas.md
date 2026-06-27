@@ -193,6 +193,22 @@ Now caller-owned (allocated once in main before the loop) and filled in place,
 so the page-tick render allocates nothing for the section list. Small (one slice
 header/frame) but free and on the page-tick cadence.
 
+### 22. ✅ QueryArrivals: reusable scratch (`QueryArrivalsInto`) for zero-alloc renders
+The query's remaining 13 allocs/call were entirely the `arrivals` slice growing
+from nil (geometric reallocation). Added `QueryArrivalsInto(dst, …)`:
+`QueryArrivals` calls it with nil (one-shot, tests unchanged); the render loop
+keeps one scratch slice per stop and feeds it back each frame so the backing is
+reused. A naïve pre-sized cap was rejected first — it cut allocs but inflated
+B/op and left CPU flat. The scratch approach is strictly better.
+
+| Benchmark (3 stops)     | ns/op   | B/op  | allocs |
+| ----------------------- | ------- | ----- | ------ |
+| QueryArrivals (nil dst) | ~82,000 | 7,472 | 13     |
+| QueryArrivalsReuse      | ~76,000 | **0** | **0**  |
+
+The device render loop uses the reuse path → zero arrivals allocation per
+render/page tick. Race-clean, golden lock holds, preview identical.
+
 ### 21. ✅ lcd driver: per-row Pix walk instead of per-pixel GrayAt ⭐
 `writeRGB565`/`writeXRGB8888` called `img.GrayAt(x,y)` for each of ~614k pixels
 per frame — every call recomputes a `PixOffset` (multiply) and bounds-checks.
@@ -268,6 +284,12 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 22 — QueryArrivalsInto reusable scratch (KEPT)
+Added a `dst`-scratch variant so the render loop reuses one arrivals backing per
+stop across frames; `QueryArrivals(nil, …)` preserves the one-shot API for tests.
+Steady-state query: 13 allocs / 7,472 B → **0 / 0**, ~8% faster, with no byte
+inflation (unlike the rejected pre-sized-cap approach). New reuse benchmark added.
 
 ### Idea 19 & 21 — render-loop sections reuse + lcd per-row Pix walk (KEPT)
 Idea 19: `renderAndDisplay` now fills a caller-owned `sections` slice (allocated

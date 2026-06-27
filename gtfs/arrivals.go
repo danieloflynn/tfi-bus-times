@@ -19,6 +19,7 @@ const lookbackHours = 3
 // the common case and avoids the per-query map allocation.
 const dedupLinearMax = 48
 
+
 // Arrival is one upcoming bus arrival as shown on the display.
 type Arrival struct {
 	RouteShort    string
@@ -104,6 +105,27 @@ func QueryArrivals(
 	minMinutes int,
 	routeFilter map[string]bool,
 ) []Arrival {
+	return QueryArrivalsInto(nil, db, live, stopNumber, now, maxMinutes, minMinutes, routeFilter)
+}
+
+// QueryArrivalsInto is QueryArrivals with a caller-supplied scratch slice. The
+// result reuses dst's backing array (dst[:0]) when it is large enough, so a
+// caller that keeps one scratch per stop and feeds it back each frame makes the
+// query allocation-free in steady state — no per-render arrivals allocation and
+// no over-provisioned capacity. Pass nil for one-shot callers (QueryArrivals).
+// The returned slice aliases dst's backing, so the caller must finish consuming
+// the previous result before reusing the same scratch (the render loop does:
+// DisplayFrame copies pixels synchronously before the next query).
+func QueryArrivalsInto(
+	dst []Arrival,
+	db *StaticDB,
+	live *LiveStore,
+	stopNumber string,
+	now time.Time,
+	maxMinutes int,
+	minMinutes int,
+	routeFilter map[string]bool,
+) []Arrival {
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	nowSecs := now.Hour()*3600 + now.Minute()*60 + now.Second()
 	windowEnd := now.Add(time.Duration(maxMinutes) * time.Minute)
@@ -139,7 +161,12 @@ func QueryArrivals(
 	// lock-free instead of locking per candidate (was 2 RLock pairs/candidate).
 	snap := live.snapshot()
 
-	var arrivals []Arrival
+	// Reuse the caller's scratch backing (dst[:0]); appends grow it only the
+	// first time a stop's window exceeds the prior capacity. The geometric
+	// slice-growth reallocations from a nil start were the query's entire
+	// remaining heap (one alloc per growth step, every render) — with a reused
+	// scratch they vanish in steady state.
+	arrivals := dst[:0]
 
 	stopHours := db.StopTimes[stopNumber]
 	for _, hour := range tryHours {

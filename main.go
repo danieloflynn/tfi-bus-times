@@ -194,10 +194,14 @@ func main() {
 	// Reused across frames so the per-frame render allocates nothing for the
 	// section-list header (its length is fixed by the configured stops).
 	sections := make([]display.StopSection, len(cfg.Stops))
+	// One arrivals scratch slice per stop, fed back to QueryArrivalsInto each
+	// frame so the query reuses its backing array instead of allocating one per
+	// render (see QueryArrivalsInto). The slices live for the whole process.
+	arrScratch := make([][]gtfs.Arrival, len(cfg.Stops))
 
 	// Render immediately on start (if awake).
 	if !sleeping {
-		renderAndDisplay(renderer, sections, drv, dbHolder, live, cfg, routeFilter, page)
+		renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page)
 	}
 
 	// Signal handler for graceful shutdown.
@@ -214,7 +218,7 @@ func main() {
 					slog.Warn("display wake failed", "err", err)
 				}
 				sleeping = false
-				renderAndDisplay(renderer, sections, drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page)
 			} else if !sleeping && !active {
 				slog.Info("outside active hours — sleeping display")
 				drv.Clear()
@@ -225,12 +229,12 @@ func main() {
 			}
 		case <-refreshTicker.C:
 			if !sleeping {
-				renderAndDisplay(renderer, sections, drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page)
 			}
 		case <-pageTicker.C:
 			if !sleeping {
 				page++
-				renderAndDisplay(renderer, sections, drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page)
 			}
 		case sig := <-quit:
 			slog.Info("shutting down", "signal", sig)
@@ -261,6 +265,7 @@ func isActiveTime(now, start, stop time.Time) bool {
 func renderAndDisplay(
 	renderer *display.Renderer,
 	sections []display.StopSection,
+	arrScratch [][]gtfs.Arrival,
 	drv driver.Driver,
 	dbHolder *gtfs.DB,
 	live *gtfs.LiveStore,
@@ -281,11 +286,13 @@ func renderAndDisplay(
 	// sections is caller-owned and reused across frames; fill it in place.
 	totalArrivals := 0
 	for i, s := range cfg.Stops {
-		arr := gtfs.QueryArrivals(db, live, s.StopNumber, now, cfg.MaxMinutes, s.WalkingMinutes, routeFilter)
-		totalArrivals += len(arr)
-		start, end := pageWindow(len(arr), pageSize, cfg.MaxPages, page)
-		arr = arr[start:end]
-		sections[i] = display.StopSection{Label: s.Label, Arrivals: arr}
+		// Reuse this stop's scratch backing across frames (fed back below) so the
+		// query allocates nothing for arrivals in steady state.
+		full := gtfs.QueryArrivalsInto(arrScratch[i], db, live, s.StopNumber, now, cfg.MaxMinutes, s.WalkingMinutes, routeFilter)
+		arrScratch[i] = full
+		totalArrivals += len(full)
+		start, end := pageWindow(len(full), pageSize, cfg.MaxPages, page)
+		sections[i] = display.StopSection{Label: s.Label, Arrivals: full[start:end]}
 	}
 
 	img := renderer.Render(sections, now, updated, drv.Width(), drv.Height())
