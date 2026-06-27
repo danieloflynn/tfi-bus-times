@@ -1,8 +1,8 @@
 package gtfs
 
 import (
+	"bytes"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
 	"net/http"
@@ -157,6 +157,11 @@ type Poller struct {
 	// prevDelayTotal is the total StopDelay count from the previous parse, used
 	// to size the decoder's delay arena so a stable feed reallocates it ~once.
 	prevDelayTotal int
+	// readBuf is reused across polls to hold the raw feed body (~776 KB). parse
+	// copies out (string(...)) every value it retains, so no sub-slice of the
+	// body outlives the parse — the backing array is safe to recycle next poll.
+	// Poll is single-goroutine, so no synchronisation is needed.
+	readBuf bytes.Buffer
 }
 
 // NewPoller creates a Poller for the given GTFS-RT endpoint. db is a holder so
@@ -223,7 +228,15 @@ func (p *Poller) fetch() ([]byte, error) {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(resp.Body)
+	// Reuse the buffer's backing array across polls: Reset keeps the capacity,
+	// so after the first poll the ~776 KB read does no fresh allocation. Safe
+	// because parse retains no sub-slice of the returned bytes (see readBuf).
+	p.readBuf.Reset()
+	if _, err := p.readBuf.ReadFrom(resp.Body); err != nil {
+		slog.Error("realtime read body", "err", err)
+		return nil, err
+	}
+	return p.readBuf.Bytes(), nil
 }
 
 // BackoffDuration returns the exponential backoff duration for the current rate

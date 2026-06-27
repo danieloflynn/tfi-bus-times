@@ -193,7 +193,7 @@ The `seen2 := make(map[dedupKey]bool)` is allocated every call. Typical stops
 have a handful of arrivals; an O(N²) linear dedup over the result slice avoids
 the map allocation entirely below a small threshold.
 
-### 13. ⬜ Poller.fetch: reuse the read buffer across polls
+### 13. ✅ Poller.fetch: reuse the read buffer across polls
 `io.ReadAll(resp.Body)` allocates a fresh ~776 KB buffer every poll. Read into a
 Poller-owned `bytes.Buffer` that is `Reset()` each poll so the backing array is
 recycled. parse copies out only the strings it stores, so reusing the raw bytes
@@ -214,6 +214,16 @@ lever set in `tfi-display.service` Environment.
 `face.Metrics().Ascent.Ceil()` is called throughout the renderer. Expose
 package-level precomputed ascents from the `fonts` package so the renderer reads
 a constant instead of re-deriving metrics each call.
+
+### Idea 13 — reuse the fetch read buffer across polls (KEPT)
+`io.ReadAll(resp.Body)` allocated a fresh, doubling-growth buffer every poll
+(~1.5 MB allocated to land a ~776 KB body). Replaced with a Poller-owned
+`bytes.Buffer` that is `Reset()` (capacity retained) and filled via `ReadFrom`,
+so after the first poll the body read does no fresh allocation. Safe because
+parse copies out every retained value, leaving no sub-slice of the body alive
+past the parse. Not visible in PollerParse (which feeds parse a pre-read slice),
+but removes ~1.5 MB of per-poll allocation churn on the device. Covered by the
+existing Poll/fetch httptest tests.
 
 ### Idea 12 — linear dedup for small arrival counts (KEPT)
 Replaced the unconditional `make(map[dedupKey]bool)` in QueryArrivals's dedup
