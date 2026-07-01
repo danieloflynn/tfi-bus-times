@@ -116,7 +116,7 @@ ssh <pi-host> "sudo systemctl restart tfi-display"
 
 ## Auto-Updates (optional)
 
-`tfi-display` — the binary built and deployed above — is fully standalone. It only talks to the TFI GTFS API; there is no auto-update logic in it and no dependency on any particular server.
+`tfi-display` — the binary built and deployed above — talks to the TFI GTFS API for its core function; there is no auto-update logic in it and no hard dependency on any particular server. It optionally reports its own activity log to the same self-hosted backend described below (see *Remote Logging*), but that's a best-effort diagnostic sink, not a dependency — `tfi-display` runs exactly the same with it unset.
 
 `tfi-agent` is a **separate, optional** binary (`make build-agent-pi`, `make deploy-agent`) for anyone who wants to push binary/config updates to one or more devices from their own server, instead of SSHing in for every change. It is not built or installed unless you explicitly run those targets, and even then it does nothing until `base_url` (your update server's origin) is set in `secrets.yaml`.
 
@@ -129,6 +129,18 @@ If you want to self-host an update server, `tfi-agent` expects three endpoints:
 | `POST /api/tfi/v1/releases/report` | `Authorization: Bearer <device_token>` | Failure reports, keyed by the top-level event name. `{"release_failure": {"version": "...", "error": "..."}}` is sent when an install fails and is rolled back — the version is the suspect, so the server should mark it bad. `{"update_error": {"version": "...", "stage": "...", "error": "..."}}` is sent for environmental failures that aren't the release's fault (e.g. a download that never completed) — the server should surface it for visibility but **not** blacklist the version, since the agent keeps retrying it. |
 
 Both `base_url` and `device_token` are per-device secrets set in `secrets.yaml` (see `secrets.yaml.example`) — kept there, not in `config.yaml`, because the agent overwrites `config.yaml` on each sync but never touches `secrets.yaml`. Binary updates need no auth since `/latest` is public; without `device_token`, config sync and failure reporting are skipped but binary updates still work.
+
+### Remote Logging (optional)
+
+Both `tfi-display` and `tfi-agent` can report their own log lines to the same backend, so lifecycle events, GTFS polling problems, and display errors are visible centrally instead of only on the device's serial console:
+
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `POST /api/tfi/v1/activity_logs/report` | `Authorization: Bearer <device_token>` | `{"activity_log": {"level": "info", "message": "..."}}`. `level` is one of `debug`/`info`/`warn`/`error`. |
+
+This reuses the same `base_url`/`device_token` from `secrets.yaml` — no separate credential. It's purely a diagnostic sink: sending is fire-and-forget (from a background goroutine, with its own short timeout) and any failure is swallowed after a local log line, so a slow or unreachable logging backend can never block or crash the device. Without `device_token`/`base_url` set, logging calls are silent no-ops.
+
+`remote_log_level` in `config.yaml` (default `info`) filters which levels are sent — set it to `debug` for verbose diagnostics (e.g. every successful GTFS poll), or `warn`/`error` to quiet it down.
 
 ## Development / Mock Mode
 

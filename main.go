@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"tfi-display/display"
 	"tfi-display/display/driver"
 	"tfi-display/gtfs"
+	"tfi-display/remotelog"
 )
 
 func main() {
@@ -34,6 +36,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Reports this device's own log lines to the dandev backend, using the same
+	// base_url/device_token tfi-agent already syncs config/releases with. A
+	// diagnostic sink only — see remotelog package doc for the fire-and-forget
+	// contract. rlog is safe to use even when base_url/device_token are unset
+	// (Log becomes a no-op).
+	rlog := remotelog.New(cfg.BaseURL, cfg.DeviceToken, remotelog.ParseLevel(cfg.RemoteLogLevel))
+	rlog.Info("tfi-display starting up")
+
 	// --- Static data ---
 	stopNumbers := make([]string, len(cfg.Stops))
 	for i, s := range cfg.Stops {
@@ -44,6 +54,7 @@ func main() {
 	db, err := gtfs.LoadOrBuild(cfg.StaticURL, cfg.DataDir, stopNumbers)
 	if err != nil {
 		slog.Error("loading static data", "err", err)
+		rlog.Error("loading static GTFS data: " + err.Error())
 		os.Exit(1)
 	}
 
@@ -54,6 +65,7 @@ func main() {
 
 	// --- Live store & poller ---
 	poller := gtfs.NewPoller(cfg.LiveURL, cfg.APIKey, dbHolder)
+	poller.SetRemoteLogger(rlog)
 	live := poller.Store()
 
 	// Initial live data fetch.
@@ -65,18 +77,21 @@ func main() {
 		drv, err = driver.NewMockDriver(*mockDir)
 		if err != nil {
 			slog.Error("creating mock driver", "err", err)
+			rlog.Error("creating mock driver: " + err.Error())
 			os.Exit(1)
 		}
 	} else {
 		drv, err = newHardwareDriver(cfg)
 		if err != nil {
 			slog.Error("opening hardware display", "err", err)
+			rlog.Error("opening hardware display: " + err.Error())
 			os.Exit(1)
 		}
 	}
 
 	if err := drv.Init(); err != nil {
 		slog.Error("display init", "err", err)
+		rlog.Error("display init: " + err.Error())
 		os.Exit(1)
 	}
 
@@ -100,12 +115,14 @@ func main() {
 		slog.Info("outside active hours — display sleeping", "start", cfg.StartTime, "stop", cfg.StopTime)
 		if err := drv.Sleep(); err != nil {
 			slog.Warn("display sleep failed", "err", err)
+			rlog.Warn("display sleep failed: " + err.Error())
 		}
 		sleeping = true
 	} else {
 		// Ensure display is unblanked on startup (guards against a previous manual blank).
 		if err := drv.Wake(); err != nil {
 			slog.Warn("display wake failed", "err", err)
+			rlog.Warn("display wake failed: " + err.Error())
 		}
 	}
 
@@ -143,6 +160,7 @@ func main() {
 				lastRefresh = time.Now()
 				if err != nil {
 					slog.Warn("static refresh failed", "err", err)
+					rlog.Warn("static refresh failed: " + err.Error())
 					continue
 				}
 				if newDB != nil {
@@ -150,6 +168,7 @@ func main() {
 					slog.Info("static data refreshed",
 						"trips", len(newDB.Trips),
 						"timestamp", newDB.Timestamp.Format(time.RFC3339))
+					rlog.Info(fmt.Sprintf("static data refreshed: %d trips", len(newDB.Trips)))
 				} else {
 					slog.Debug("static data already current")
 				}
@@ -201,7 +220,7 @@ func main() {
 
 	// Render immediately on start (if awake).
 	if !sleeping {
-		renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page)
+		renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page, rlog)
 	}
 
 	// Signal handler for graceful shutdown.
@@ -214,31 +233,40 @@ func main() {
 			active := isActiveTime(time.Now(), schedStart, schedStop)
 			if sleeping && active {
 				slog.Info("entering active hours — waking display")
+				rlog.Info("entering active hours — waking display")
 				if err := drv.Wake(); err != nil {
 					slog.Warn("display wake failed", "err", err)
+					rlog.Warn("display wake failed: " + err.Error())
 				}
 				sleeping = false
-				renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page, rlog)
 			} else if !sleeping && !active {
 				slog.Info("outside active hours — sleeping display")
+				rlog.Info("outside active hours — sleeping display")
 				drv.Clear()
 				if err := drv.Sleep(); err != nil {
 					slog.Warn("display sleep failed", "err", err)
+					rlog.Warn("display sleep failed: " + err.Error())
 				}
 				sleeping = true
 			}
 		case <-refreshTicker.C:
 			if !sleeping {
-				renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page, rlog)
 			}
 		case <-pageTicker.C:
 			if !sleeping {
 				page++
-				renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page)
+				renderAndDisplay(renderer, sections, arrScratch, drv, dbHolder, live, cfg, routeFilter, page, rlog)
 			}
 		case sig := <-quit:
 			slog.Info("shutting down", "signal", sig)
+			rlog.Info(fmt.Sprintf("shutting down (signal %s)", sig))
 			drv.Sleep()
+			// rlog.Info above fires from a background goroutine; give it a brief
+			// window to actually reach the network before os.Exit tears the
+			// process down, otherwise the shutdown log is silently lost.
+			time.Sleep(200 * time.Millisecond)
 			os.Exit(0)
 		}
 	}
@@ -272,6 +300,7 @@ func renderAndDisplay(
 	cfg *config.Config,
 	routeFilter map[string]bool,
 	page int,
+	rlog *remotelog.Client,
 ) {
 	// Load the current snapshot each render so a background refresh is picked up.
 	db := dbHolder.Load()
@@ -298,6 +327,7 @@ func renderAndDisplay(
 	img := renderer.Render(sections, now, updated, drv.Width(), drv.Height())
 	if err := drv.DisplayFrame(img); err != nil {
 		slog.Error("display frame", "err", err)
+		rlog.Error("display frame: " + err.Error())
 	} else {
 		slog.Info("display updated", "arrivals", totalArrivals, "time", now.Format("15:04:05"))
 	}

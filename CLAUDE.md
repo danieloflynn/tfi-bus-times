@@ -29,6 +29,8 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 **`cmd/agent/`** — Entry point for the `tfi-agent` binary. Parses flags, builds the agent, and runs it under a SIGTERM-aware context.
 
+**`remotelog/`** — `Client` reports this device's own log lines to the dandev backend (`POST /api/tfi/v1/activity_logs/report`, `Authorization: Bearer <device_token>`), reusing the same `base_url`/`device_token` already used elsewhere (see *Remote activity logging* below). Both `tfi-display` (`main.go`) and `tfi-agent` (`agent/agent.go`) hold one `*remotelog.Client` each.
+
 **`gtfs/`** — All GTFS logic:
 - `static.go` — downloads the TFI GTFS ZIP, parses it into a `StaticDB` (stops, trips, services, calendar exceptions), and caches it as a gob file. Cache is invalidated by the upstream `Last-Modified` header or a schema version bump.
 - `realtime.go` — polls the GTFS-RT TripUpdates endpoint, parses protobuf into a `LiveStore`. Handles delays (absolute timestamps or delta seconds), cancellations, and added trips. Includes exponential backoff on rate-limit errors.
@@ -76,7 +78,7 @@ Real-time bus/tram departure board for Raspberry Pi. Fetches live GTFS data from
 
 **Display sleep/wake** — When `start_time`/`stop_time` are set, the display sleeps outside active hours. The schedule ticker fires every minute to check `isActiveTime`. Overnight ranges (e.g. 22:00–06:00) are supported.
 
-**Secrets/config split** — `api_key` and the agent's `device_token` are kept in `/etc/tfi-display/secrets.yaml` (mode 600, root-only), separate from the main `config.yaml` so config can be distributed remotely without exposing secrets. `tfi-display` merges both via `LoadWithSecrets`; `tfi-agent` reads only `device_token`. The agent never *writes* `secrets.yaml`.
+**Secrets/config split** — `api_key`, `base_url`, and `device_token` are kept in `/etc/tfi-display/secrets.yaml` (mode 600, root-only), separate from the main `config.yaml` so config can be distributed remotely without exposing secrets. `tfi-display` merges all three via `LoadWithSecrets` into `config.Config` (`base_url`/`device_token` feed the optional `remotelog.Client` — see *Remote activity logging*); `tfi-agent` reads `base_url`/`device_token` itself, independently of the `config` package (see `agent.secretSettings`), plus `device_token` for config sync/failure reporting. The agent never *writes* `secrets.yaml`.
 
 **Atomic binary install** — `updater.installBinary` writes to `<target>.new` first, sets mode 0755, then `os.Rename` into place. On Linux, rename within the same filesystem is atomic, so the running binary is never partially overwritten. The previous binary is preserved at `<target>.prev` for one-step rollback. `updater.writeFileAtomic` / `ApplyConfig` do the same for config files.
 
@@ -93,6 +95,8 @@ Downloaded binaries are staged to a **dedicated directory** (`/var/lib/tfi-agent
 **One-shot diagnostic logging** — `QueryArrivals` runs on every render and page tick (seconds apart), so unconditional rescue logs would spam. `LiveStore.DiagLogOnce(key)` returns true only the first time a key is seen for the current feed snapshot; the dedupe map is reset in `parse`'s atomic swap, so each anomaly is logged at most once per poll cycle. These INFO logs are the built-in confirmation of *which* mechanism (severe delay vs added trip) is rescuing a service.
 
 **Board version display** — the HD renderer draws a build version in the top-left of the header, opposite the right-aligned timestamp, so you can confirm at a glance which release is live on the board. The string lives in `display.Version` (`display/version.go`), defaulting to `"dev"`, and is injected at build time via the linker: `-X tfi-display/display.Version=v<n>`. The Makefile (`build`, `build-pi`) and the release workflow set `<n>` to `git rev-list --count HEAD` (the commit count) so it auto-increments on every release with no manual bump. The release workflow checks out with `fetch-depth: 0` so the count is accurate (shallow clones would report 1). Only the HD path renders it; the legacy small/e-ink header is already full (STOP label left, Updated right).
+
+**Remote activity logging** — `remotelog.Client` (`remotelog/remotelog.go`) posts `{"activity_log": {"level", "message"}}` to `POST /api/tfi/v1/activity_logs/report` under `Bearer <device_token>` — the same dandev backend and credential `tfi-agent` already uses for config sync/release reporting, so there is no second credential to configure. It is a diagnostic sink only: `Log`/`Debug`/`Info`/`Warn`/`Error` spawn the actual POST in a goroutine and return immediately, and any encode/network/non-2xx failure is logged locally via the standard `log` package and otherwise swallowed — a slow or unreachable logging backend can never block or crash device operation. All methods (including `Update`) are nil-receiver-safe, so a zero-value `*Client` field (e.g. in hand-built test fixtures) is simply a no-op rather than a crash. `baseURL`/`deviceToken`/`minLevel` are mutable via `Update` under a mutex, so both `main.go` and `agent.Agent.reloadSettings` can refresh them each cycle without discarding the client's pooled HTTP connections. `remote_log_level` in `config.yaml` (`config.Config.RemoteLogLevel`, `agent.fileSettings.RemoteLogLevel`) filters the minimum level sent — default `info`; use `debug` for high-frequency diagnostics like "GTFS feed polled successfully" that would otherwise spam the log stream. `tfi-display` builds one `*remotelog.Client` in `main.go` from `cfg.BaseURL`/`cfg.DeviceToken` (see *Secrets/config split*) and threads it into `gtfs.Poller` (`SetRemoteLogger`) and `renderAndDisplay`, logging at boot, config/static-data load failures, display init/frame/sleep/wake errors, static-data refresh outcomes, GTFS poll success (debug)/slow response (warn)/failure (error), and shutdown. `tfi-agent` logs at start/shutdown and around each binary/config check in `agent.go`, alongside its existing local `log.Printf` calls and `/releases/report` reporting — the two are complementary, not a replacement for each other.
 
 **Non-obvious code must have comments** — whenever a piece of code does something that isn't immediately clear from reading it (e.g. the 12-hour overnight rule, BOM stripping in CSV headers, backoff logic), add an inline comment explaining _why_, not just _what_. Also update this file to document any new patterns introduced.
 
@@ -147,6 +151,9 @@ Key fields:
 | `display_model`                | `lcd`         | Display type                                        |
 | `framebuffer_device`           | `/dev/fb0`    | Path to framebuffer                                 |
 | `start_time` / `stop_time`     | (unset)       | HH:MM wake/sleep schedule; set both or neither      |
+| `remote_log_level`             | `info`        | Minimum level (debug/info/warn/error) reported via `remotelog`; see *Remote activity logging* |
+
+`base_url` and `device_token` (remote logging + `tfi-agent` sync) live in `secrets.yaml`, not `config.yaml` — see *Secrets/config split*.
 
 ---
 

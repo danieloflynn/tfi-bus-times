@@ -28,6 +28,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"tfi-display/remotelog"
 	"tfi-display/updater"
 )
 
@@ -76,6 +77,14 @@ type Agent struct {
 	retryAttempts   int
 	retryDelay      time.Duration
 
+	// remote reports the agent's own activity to the dandev backend
+	// (POST /activity_logs/report) using the same device_token as config
+	// sync/failure reporting. reloadSettings keeps its target/token/level in
+	// sync with secrets.yaml/config.yaml each cycle. Fire-and-forget: never
+	// blocks the agent loop, and a zero-value Client (as in tests that build
+	// Agent by hand) is nil-safe.
+	remote *remotelog.Client
+
 	// Hooks over the updater package, swapped out in tests so unit tests never
 	// touch systemctl or the real filesystem layout.
 	runUpdate   func(updater.Config) error
@@ -103,6 +112,7 @@ func New(configPath, secretsPath string) (*Agent, error) {
 		http:            &http.Client{Timeout: httpTimeout},
 		retryAttempts:   defaultRetryAttempts,
 		retryDelay:      defaultRetryDelay,
+		remote:          remotelog.New("", "", remotelog.LevelInfo),
 		runUpdate:       updater.Run,
 		applyConfig:     updater.ApplyConfig,
 	}, nil
@@ -112,13 +122,19 @@ func New(configPath, secretsPath string) (*Agent, error) {
 // sync cycle, then waits for the configured interval. A failed cycle is logged
 // and retried next tick — the running display is never disturbed on failure.
 func (a *Agent) Run(ctx context.Context) error {
+	first := true
 	for {
 		a.reloadSettings()
+		if first {
+			a.remote.Info("tfi-agent started")
+			first = false
+		}
 		a.cycle(ctx)
 
 		select {
 		case <-ctx.Done():
 			log.Printf("tfi-agent: shutting down")
+			a.remote.Info("tfi-agent shutting down")
 			return nil
 		case <-time.After(a.interval):
 		}
@@ -143,7 +159,8 @@ func (a *Agent) cycle(ctx context.Context) {
 // --- settings ---
 
 type fileSettings struct {
-	UpdateIntervalSec int `yaml:"update_interval_seconds"`
+	UpdateIntervalSec int    `yaml:"update_interval_seconds"`
+	RemoteLogLevel    string `yaml:"remote_log_level"`
 }
 
 type secretSettings struct {
@@ -152,9 +169,10 @@ type secretSettings struct {
 }
 
 type settings struct {
-	BaseURL     string
-	DeviceToken string
-	Interval    time.Duration
+	BaseURL        string
+	DeviceToken    string
+	Interval       time.Duration
+	RemoteLogLevel string
 }
 
 func (a *Agent) reloadSettings() {
@@ -162,6 +180,7 @@ func (a *Agent) reloadSettings() {
 	a.baseURL = s.BaseURL
 	a.deviceToken = s.DeviceToken
 	a.interval = s.Interval
+	a.remote.Update(s.BaseURL, s.DeviceToken, remotelog.ParseLevel(s.RemoteLogLevel))
 }
 
 // loadSettings reads only the fields the agent needs, leniently: missing or
@@ -249,6 +268,7 @@ func (a *Agent) checkBinary(ctx context.Context) error {
 		return http.NewRequest(http.MethodGet, a.baseURL+"/api/tfi/v1/latest", nil)
 	})
 	if err != nil {
+		a.remote.Error(fmt.Sprintf("fetching latest release info: %v", err))
 		return fmt.Errorf("fetching latest: %w", err)
 	}
 	defer resp.Body.Close()
@@ -269,14 +289,17 @@ func (a *Agent) checkBinary(ctx context.Context) error {
 	// release to an older build) flow down to the device.
 	if latest.Version == installed {
 		log.Printf("tfi-agent: binary up to date (%s)", installed)
+		a.remote.Debug(fmt.Sprintf("binary up to date (%s)", installed))
 		return nil
 	}
 	if a.isBadVersion(latest.Version) {
 		log.Printf("tfi-agent: skipping known-bad version %s", latest.Version)
+		a.remote.Warn(fmt.Sprintf("skipping known-bad version %s", latest.Version))
 		return nil
 	}
 
 	log.Printf("tfi-agent: new version %s (installed %q) — downloading", latest.Version, installed)
+	a.remote.Info(fmt.Sprintf("new binary version %s available (installed %q) — downloading", latest.Version, installed))
 	staged := filepath.Join(a.updaterCfg.StagingDir, binaryName)
 	if err := a.downloadFile(latest.DownloadURL, staged); err != nil {
 		// Report download failures centrally too — this is the step that silently
@@ -287,6 +310,7 @@ func (a *Agent) checkBinary(ctx context.Context) error {
 		// rather than skip a perfectly good build forever.
 		err = fmt.Errorf("downloading binary to %s: %w", staged, err)
 		log.Printf("tfi-agent: %v — reporting", err)
+		a.remote.Error(fmt.Sprintf("downloading binary for version %s: %v", latest.Version, err))
 		if rErr := a.reportUpdateError(ctx, latest.Version, "download", err.Error()); rErr != nil {
 			log.Printf("tfi-agent: reporting download failure: %v", rErr)
 		}
@@ -297,6 +321,7 @@ func (a *Agent) checkBinary(ctx context.Context) error {
 		// updater.Run has already rolled back. Remember the bad version so we do
 		// not retry it every cycle, and report it centrally.
 		log.Printf("tfi-agent: update to %s failed: %v — recording and reporting", latest.Version, err)
+		a.remote.Error(fmt.Sprintf("installing version %s failed (rolled back): %v", latest.Version, err))
 		if mErr := a.markBadVersion(latest.Version); mErr != nil {
 			log.Printf("tfi-agent: recording bad version: %v", mErr)
 		}
@@ -310,6 +335,7 @@ func (a *Agent) checkBinary(ctx context.Context) error {
 		log.Printf("tfi-agent: writing version marker: %v", err)
 	}
 	log.Printf("tfi-agent: updated to %s", latest.Version)
+	a.remote.Info(fmt.Sprintf("updated to version %s", latest.Version))
 	return nil
 }
 
@@ -330,14 +356,17 @@ func (a *Agent) checkConfig(ctx context.Context) error {
 		return req, nil
 	})
 	if err != nil {
+		a.remote.Error(fmt.Sprintf("fetching config: %v", err))
 		return fmt.Errorf("fetching config: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		a.remote.Error(fmt.Sprintf("config fetch returned %s", resp.Status))
 		return fmt.Errorf("config fetch returned %s", resp.Status)
 	}
-	remote, err := io.ReadAll(resp.Body)
+	remoteCfg, err := io.ReadAll(resp.Body)
 	if err != nil {
+		a.remote.Error(fmt.Sprintf("reading config body: %v", err))
 		return fmt.Errorf("reading config body: %w", err)
 	}
 
@@ -345,16 +374,20 @@ func (a *Agent) checkConfig(ctx context.Context) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("reading current config: %w", err)
 	}
-	if err == nil && bytes.Equal(current, remote) {
+	if err == nil && bytes.Equal(current, remoteCfg) {
 		log.Printf("tfi-agent: config up to date")
+		a.remote.Debug("config up to date")
 		return nil
 	}
 
 	log.Printf("tfi-agent: config changed — applying")
-	if err := a.applyConfig(remote, a.configPath, a.serviceName, a.waitTimeout); err != nil {
+	a.remote.Info("config changed — applying")
+	if err := a.applyConfig(remoteCfg, a.configPath, a.serviceName, a.waitTimeout); err != nil {
+		a.remote.Error(fmt.Sprintf("applying config failed: %v", err))
 		return fmt.Errorf("applying config: %w", err)
 	}
 	log.Printf("tfi-agent: config updated")
+	a.remote.Info("config updated")
 	return nil
 }
 

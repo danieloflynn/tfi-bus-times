@@ -42,10 +42,22 @@ type Config struct {
 	DataDir           string       `yaml:"data_dir"`
 	StartTime         string       `yaml:"start_time"` // e.g. "07:00" — display powers on
 	StopTime          string       `yaml:"stop_time"`  // e.g. "22:00" — display powers off
+
+	// BaseURL/DeviceToken authenticate tfi-display to the same dandev backend
+	// tfi-agent already syncs config/releases with (see agent.secretSettings).
+	// They live in secrets.yaml, not here — see LoadWithSecrets — but the yaml
+	// tags let loadFile/Load populate them directly for single-file test setups.
+	// Used only for optional remote activity-log reporting (remotelog package);
+	// empty values simply mean remote logging is disabled.
+	BaseURL        string `yaml:"base_url"`
+	DeviceToken    string `yaml:"device_token"`
+	RemoteLogLevel string `yaml:"remote_log_level"` // debug/info/warn/error, default info
 }
 
 type secretsFile struct {
-	APIKey string `yaml:"api_key"`
+	APIKey      string `yaml:"api_key"`
+	BaseURL     string `yaml:"base_url"`
+	DeviceToken string `yaml:"device_token"`
 }
 
 // loadFile reads and parses a YAML config file, applies defaults, and validates
@@ -161,6 +173,15 @@ func LoadWithSecrets(configPath, secretsPath string) (*Config, error) {
 			}
 			if s.APIKey != "" {
 				cfg.APIKey = s.APIKey
+			}
+			// Same secrets file tfi-agent reads base_url/device_token from — reuse
+			// it here so tfi-display can also authenticate remote log reports to
+			// the dandev backend, without a second credential to manage.
+			if s.BaseURL != "" {
+				cfg.BaseURL = s.BaseURL
+			}
+			if s.DeviceToken != "" {
+				cfg.DeviceToken = s.DeviceToken
 			}
 		} else if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("reading secrets file %q: %w", secretsPath, err)

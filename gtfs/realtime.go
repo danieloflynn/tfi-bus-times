@@ -8,7 +8,15 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"tfi-display/remotelog"
 )
+
+// slowFetchThreshold flags a realtime fetch as degraded-but-recovering: the
+// poll still succeeded, but slowly enough to be worth surfacing remotely
+// (e.g. a flaky connection or an upstream slowdown), well short of the
+// timeouts that would turn it into an outright failure.
+const slowFetchThreshold = 5 * time.Second
 
 // StopDelay holds realtime delay data for one stop within a trip.
 type StopDelay struct {
@@ -216,6 +224,12 @@ type Poller struct {
 	// (no configured filter).
 	watched    map[string]bool
 	watchedFor *StaticDB
+
+	// remote optionally mirrors poll outcomes to the dandev backend. Left nil
+	// unless SetRemoteLogger is called (nil is safe — remotelog.Client's
+	// methods no-op on a nil receiver), so existing callers/tests are
+	// unaffected.
+	remote *remotelog.Client
 }
 
 // NewPoller creates a Poller for the given GTFS-RT endpoint. db is a holder so
@@ -227,6 +241,13 @@ func NewPoller(url, apiKey string, db *DB) *Poller {
 		db:     db,
 		store:  NewLiveStore(),
 	}
+}
+
+// SetRemoteLogger wires a remotelog.Client so poll successes/slow
+// responses/failures are also reported to the dandev backend, not just the
+// local slog output.
+func (p *Poller) SetRemoteLogger(c *remotelog.Client) {
+	p.remote = c
 }
 
 // Store returns the managed LiveStore.
@@ -245,10 +266,15 @@ func (p *Poller) Poll() int {
 	p.rateLimitCount = 0
 	if err := p.parse(data); err != nil {
 		slog.Error("parsing realtime feed", "err", err)
+		p.remote.Error("parsing realtime feed: " + err.Error())
 	} else {
 		p.store.mu.Lock()
 		p.store.LastPollTime = p.store.now()
 		p.store.mu.Unlock()
+		// Debug, not Info: this fires every poll interval (as often as every
+		// 60s), so it should be off by default and only enabled for verbose
+		// diagnostics.
+		p.remote.Debug("realtime feed polled successfully")
 	}
 	return 0
 }
@@ -258,6 +284,7 @@ type rateLimitError struct{}
 func (rateLimitError) Error() string { return "rate limited (429)" }
 
 func (p *Poller) fetch() ([]byte, error) {
+	start := time.Now()
 	req, err := http.NewRequest(http.MethodGet, p.url, nil)
 	if err != nil {
 		return nil, err
@@ -268,6 +295,7 @@ func (p *Poller) fetch() ([]byte, error) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		slog.Error("realtime fetch", "err", err)
+		p.remote.Error("realtime fetch: " + err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -276,9 +304,11 @@ func (p *Poller) fetch() ([]byte, error) {
 		p.rateLimitCount++
 		slog.Warn("rate limited", "count", p.rateLimitCount,
 			"backoff_s", math.Pow(2, float64(p.rateLimitCount)))
+		p.remote.Warn(fmt.Sprintf("realtime feed rate limited (count=%d)", p.rateLimitCount))
 		return nil, rateLimitError{}
 	}
 	if resp.StatusCode != http.StatusOK {
+		p.remote.Error(fmt.Sprintf("realtime fetch returned HTTP %d", resp.StatusCode))
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
@@ -288,7 +318,13 @@ func (p *Poller) fetch() ([]byte, error) {
 	p.readBuf.Reset()
 	if _, err := p.readBuf.ReadFrom(resp.Body); err != nil {
 		slog.Error("realtime read body", "err", err)
+		p.remote.Error("realtime read body: " + err.Error())
 		return nil, err
+	}
+
+	if elapsed := time.Since(start); elapsed > slowFetchThreshold {
+		slog.Warn("realtime fetch slow", "elapsed", elapsed)
+		p.remote.Warn(fmt.Sprintf("realtime fetch slow: took %s", elapsed.Round(time.Millisecond)))
 	}
 	return p.readBuf.Bytes(), nil
 }
