@@ -84,3 +84,12 @@ display_model: "lcd"
 # -----------------------------------------------------------------------
 # start_time: "07:00"
 # stop_time: "22:00"
+
+# -----------------------------------------------------------------------
+# Remote logging (optional): reports this device's own log lines to the
+# update server configured via base_url/device_token in secrets.yaml — see
+# "Remote Logging" in README.md. Filters which levels are sent; debug/info/
+# warn/error. Default: info (debug is off by default — it's verbose,
+# e.g. every successful GTFS poll).
+# -----------------------------------------------------------------------
+# remote_log_level: "info"
