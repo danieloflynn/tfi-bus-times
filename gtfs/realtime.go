@@ -225,7 +225,7 @@ type Poller struct {
 	watched    map[string]bool
 	watchedFor *StaticDB
 
-	// remote optionally mirrors poll outcomes to the dandev backend. Left nil
+	// remote optionally mirrors poll outcomes to the update server. Left nil
 	// unless SetRemoteLogger is called (nil is safe — remotelog.Client's
 	// methods no-op on a nil receiver), so existing callers/tests are
 	// unaffected.
@@ -244,7 +244,7 @@ func NewPoller(url, apiKey string, db *DB) *Poller {
 }
 
 // SetRemoteLogger wires a remotelog.Client so poll successes/slow
-// responses/failures are also reported to the dandev backend, not just the
+// responses/failures are also reported to the update server, not just the
 // local slog output.
 func (p *Poller) SetRemoteLogger(c *remotelog.Client) {
 	p.remote = c

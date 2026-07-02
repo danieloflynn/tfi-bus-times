@@ -1,4 +1,5 @@
-// Package remotelog reports this device's own log lines to the dandev backend
+// Package remotelog reports this device's own log lines to the same
+// self-hosted update server tfi-agent syncs from
 // (POST /api/tfi/v1/activity_logs/report), so they're visible centrally
 // instead of only on the device's serial console.
 //

@@ -87,7 +87,7 @@ display_model: "lcd"
 
 # -----------------------------------------------------------------------
 # Remote logging (optional): reports this device's own log lines to the
-# dandev backend configured via base_url/device_token in secrets.yaml — see
+# update server configured via base_url/device_token in secrets.yaml — see
 # "Remote Logging" in README.md. Filters which levels are sent; debug/info/
 # warn/error. Default: info (debug is off by default — it's verbose,
 # e.g. every successful GTFS poll).

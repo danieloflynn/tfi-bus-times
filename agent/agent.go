@@ -77,7 +77,7 @@ type Agent struct {
 	retryAttempts   int
 	retryDelay      time.Duration
 
-	// remote reports the agent's own activity to the dandev backend
+	// remote reports the agent's own activity to the update server
 	// (POST /activity_logs/report) using the same device_token as config
 	// sync/failure reporting. reloadSettings keeps its target/token/level in
 	// sync with secrets.yaml/config.yaml each cycle. Fire-and-forget: never

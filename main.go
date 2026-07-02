@@ -36,7 +36,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Reports this device's own log lines to the dandev backend, using the same
+	// Reports this device's own log lines to the update server, using the same
 	// base_url/device_token tfi-agent already syncs config/releases with. A
 	// diagnostic sink only — see remotelog package doc for the fire-and-forget
 	// contract. rlog is safe to use even when base_url/device_token are unset
