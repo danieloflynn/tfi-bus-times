@@ -62,6 +62,20 @@ max_minutes: 90
 # static_refresh_seconds: 86400
 
 # -----------------------------------------------------------------------
+# Liveness watchdog: how long the board may go without a *successful*
+# realtime poll before the process exits so systemd restarts it.
+# Default: 1800 (30 minutes).  A negative value disables it.
+#
+# This catches the failure where the process is alive but no longer
+# working — the board keeps drawing, but the "Updated" clock in the header
+# has frozen and every arrival has quietly reverted to its scheduled time.
+# systemd's Restart= can't see that on its own, because nothing crashed.
+# A restart costs a few seconds (the static dataset reloads from cache), so
+# tripping this during a genuine TFI outage is harmless.
+# -----------------------------------------------------------------------
+# feed_watchdog_seconds: 1800
+
+# -----------------------------------------------------------------------
 # Display: 7" LCD HAT via /dev/fb0.
 # framebuffer_device defaults to "/dev/fb0" — omit if that's your device.
 # -----------------------------------------------------------------------

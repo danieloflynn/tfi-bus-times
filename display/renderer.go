@@ -76,6 +76,34 @@ func grayUniform(c color.Gray) *image.Uniform {
 // hdMinWidth is the threshold above which the HD layout is used.
 const hdMinWidth = 800
 
+// StaleAfter is how far behind the wall clock the last successful poll may fall
+// before the board marks its header timestamp as stale.
+//
+// This exists because a board that has stopped receiving live data still looks
+// perfectly healthy: the frame keeps redrawing, arrivals keep listing, and the
+// only tell is a header clock that quietly stopped advancing — easy to read as
+// the current time at a glance. Every arrival has silently reverted to its
+// scheduled time by then. Marking the header makes that state self-evident
+// instead of something you deduce days later.
+//
+// main.go raises it in proportion to poll_interval_seconds. Keep the default
+// well above a single missed poll so a transient blip never flags the board.
+// A non-positive value disables the marker.
+var StaleAfter = 10 * time.Minute
+
+// staleMarker is appended to the header timestamp when the live data is stale.
+const staleMarker = "  ! STALE"
+
+// isStale reports whether the last successful poll is old enough to warn about.
+// A zero feedTime means "no poll has completed yet" (startup), which the caller
+// already renders as the current time, so it is never stale.
+func isStale(now, feedTime time.Time) bool {
+	if StaleAfter <= 0 || feedTime.IsZero() {
+		return false
+	}
+	return now.Sub(feedTime) > StaleAfter
+}
+
 // minStringTable precomputes "1 min".."99 min" so the render hot path (every
 // arrival row, every frame, ~5 s cadence on the device) builds no per-row
 // string. fmt.Sprintf("%d min", n) previously allocated the result plus boxed
@@ -168,6 +196,9 @@ func renderInto(img *image.Gray, sections []StopSection, now, feedTime time.Time
 
 	// Header line.
 	updated := "Updated: " + feedTime.Format("15:04")
+	if isStale(now, feedTime) {
+		updated += staleMarker
+	}
 	headerText := "STOP: " + stopLabel
 	drawText(img, headerText, 2, headerHeight-2, black)
 	drawTextRight(img, updated, width-2, headerHeight-2, black)

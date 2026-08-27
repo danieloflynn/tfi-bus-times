@@ -1,15 +1,19 @@
 [Unit]
 Description=TFI GTFS Bus Display
 Documentation=https://github.com/your-org/tfi-gtfs
-After=network-online.target
-Wants=network-online.target
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 Type=simple
 User=root
 StateDirectory=tfi-display
 ExecStart=/usr/local/bin/tfi-display -config /etc/tfi-display/config.yaml -secrets /etc/tfi-display/secrets.yaml
-Restart=on-failure
+# Restart=always, not on-failure: an appliance with no keyboard should come
+# back from every exit path, including a clean one. An explicit
+# `systemctl stop` is still honoured — systemd never restarts after that,
+# whatever Restart= says.
+Restart=always
 RestartSec=10s
 
 # GC tuning for a low-churn, long-running process on the Pi Zero 2W (512 MB).

@@ -98,6 +98,10 @@ func main() {
 	// Build route filter map.
 	routeFilter := gtfs.BuildRouteFilter(cfg.Routes)
 
+	// Scale the header's stale marker to the poll cadence: a board on a 5-minute
+	// poll shouldn't be flagged for a gap a 60-second board would call stale.
+	display.StaleAfter = staleThreshold(time.Duration(cfg.PollIntervalSec) * time.Second)
+
 	// --- Schedule ---
 	var (
 		schedEnabled bool
@@ -159,6 +163,13 @@ func main() {
 				newDB, err := gtfs.MaybeRebuild(cfg.StaticURL, cfg.DataDir, stopNumbers, cur.Timestamp)
 				lastRefresh = time.Now()
 				if err != nil {
+					// Retry sooner than the full interval. Recording a plain
+					// time.Now() here would push the next attempt out a whole day
+					// on the default schedule, so one transient network blip
+					// during TFI's weekly republish leaves the dataset stale —
+					// and stale trip IDs mean every arrival silently reverts to
+					// its scheduled time until the next restart.
+					lastRefresh = staticRetryAt(lastRefresh, interval)
 					slog.Warn("static refresh failed", "err", err)
 					rlog.Warn("static refresh failed: " + err.Error())
 					continue
@@ -172,6 +183,37 @@ func main() {
 				} else {
 					slog.Debug("static data already current")
 				}
+			}
+		}()
+	}
+
+	// Liveness watchdog. See config.Config.FeedWatchdogSec: the failure this
+	// guards against is a process that is alive but no longer working, which
+	// systemd's Restart= cannot see because nothing has crashed.
+	if cfg.FeedWatchdogSec > 0 {
+		limit := time.Duration(cfg.FeedWatchdogSec) * time.Second
+		started := time.Now()
+		go func() {
+			// Check often relative to the limit so a trip is acted on promptly,
+			// but never more than once a minute — this costs one RLock per tick.
+			check := time.NewTicker(watchdogCheckInterval(limit))
+			defer check.Stop()
+			for range check.C {
+				last := live.PollTime()
+				if !feedIsStale(last, started, time.Now(), limit) {
+					continue
+				}
+				age := time.Since(lastOrStart(last, started)).Round(time.Second)
+				slog.Error("watchdog: no successful realtime poll — restarting",
+					"stale_for", age, "limit", limit)
+				rlog.Error(fmt.Sprintf(
+					"watchdog: no successful realtime poll for %s (limit %s) — exiting for restart",
+					age, limit))
+				// Give the fire-and-forget remote log a moment to leave the device;
+				// the journal entry above is already durable either way.
+				time.Sleep(500 * time.Millisecond)
+				// Non-zero so systemd treats it as a failure and restarts us.
+				os.Exit(1)
 			}
 		}()
 	}
@@ -270,6 +312,69 @@ func main() {
 			os.Exit(0)
 		}
 	}
+}
+
+// staticRetryInterval is how long to wait before retrying a static-data rebuild
+// that failed, instead of waiting out the full refresh interval.
+const staticRetryInterval = time.Hour
+
+// staticRetryAt returns the lastRefresh timestamp to record after a failed
+// static rebuild, backdated so the next attempt comes staticRetryInterval from
+// now rather than a full interval away. When the configured interval is already
+// at or below the retry window there is nothing to shorten, so now is returned
+// unchanged (never a future time, which would delay the retry instead).
+func staticRetryAt(now time.Time, interval time.Duration) time.Time {
+	if interval <= staticRetryInterval {
+		return now
+	}
+	return now.Add(staticRetryInterval - interval)
+}
+
+// staleThreshold returns how stale the live feed may get before the board's
+// header says so. It is a multiple of the poll interval — several consecutive
+// missed polls, not one — with a floor so a very short interval doesn't produce
+// a hair-trigger marker.
+func staleThreshold(pollInterval time.Duration) time.Duration {
+	const (
+		missedPolls = 10
+		floor       = 10 * time.Minute
+	)
+	if d := pollInterval * missedPolls; d > floor {
+		return d
+	}
+	return floor
+}
+
+// watchdogCheckInterval returns how often the watchdog samples the last poll
+// time: often enough to react well inside the limit, never more than once a
+// minute.
+func watchdogCheckInterval(limit time.Duration) time.Duration {
+	const minInterval = time.Minute
+	if d := limit / 4; d > minInterval {
+		return d
+	}
+	return minInterval
+}
+
+// lastOrStart returns last, falling back to started when no poll has ever
+// succeeded (a zero PollTime), so staleness is always measured from a real
+// instant rather than the zero time.
+func lastOrStart(last, started time.Time) time.Time {
+	if last.IsZero() {
+		return started
+	}
+	return last
+}
+
+// feedIsStale reports whether the live feed has gone unrefreshed for longer than
+// limit. Measuring from process start when no poll has yet succeeded means a
+// device that comes up with a dead network is caught too, not just one that
+// wedges after running fine.
+func feedIsStale(last, started, now time.Time, limit time.Duration) bool {
+	if limit <= 0 {
+		return false
+	}
+	return now.Sub(lastOrStart(last, started)) > limit
 }
 
 // isActiveTime reports whether now falls within the [start, stop) window.

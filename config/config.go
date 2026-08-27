@@ -34,6 +34,15 @@ type Config struct {
 	// without this the dataset goes stale and realtime updates stop matching.
 	// 0 = daily default (86400); a negative value disables periodic refresh.
 	StaticRefreshSec  int          `yaml:"static_refresh_seconds"`
+	// FeedWatchdogSec is how long the process may go without a *successful*
+	// realtime poll before it exits non-zero so systemd restarts it. It is a
+	// last-resort liveness net for the class of failure where the process is
+	// alive but no longer functioning (a wedged goroutine, a driver that stops
+	// accepting frames) — the board keeps drawing, but every arrival has
+	// silently reverted to its scheduled time. A restart costs a few seconds
+	// (the static dataset reloads from the gob cache), so tripping it during a
+	// genuine upstream outage is harmless. 0 = default (1800); negative disables.
+	FeedWatchdogSec   int          `yaml:"feed_watchdog_seconds"`
 	MaxMinutes        int          `yaml:"max_minutes"`
 	MaxPages          int          `yaml:"max_pages"`             // max pages to cycle (0 = unlimited)
 	PageIntervalSec   int          `yaml:"page_interval_seconds"` // seconds between pages (default: 5)
@@ -87,6 +96,11 @@ func loadFile(path string) (*Config, error) {
 	// (the refresher treats <= 0 as disabled), so leave negatives untouched.
 	if cfg.StaticRefreshSec == 0 {
 		cfg.StaticRefreshSec = 86400
+	}
+	// 0 means "unset" → 30 minutes. A negative value is an explicit opt-out
+	// (main.go treats <= 0 as disabled), so leave negatives untouched.
+	if cfg.FeedWatchdogSec == 0 {
+		cfg.FeedWatchdogSec = 1800
 	}
 	if cfg.MaxMinutes == 0 {
 		cfg.MaxMinutes = 90

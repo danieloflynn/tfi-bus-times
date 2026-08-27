@@ -106,6 +106,40 @@ ssh <pi-host> "journalctl -u tfi-display -f"   # live logs
 
 The LCD should show your configured stops with live arrival times within a minute or so. If it doesn't, check the logs above for API key or config errors.
 
+### Keeping it running for weeks
+
+Two Pi-specific gotchas will otherwise catch up with a board left on
+indefinitely. Both are worth doing once at setup time.
+
+**Turn off WiFi power save.** The Pi Zero 2W's onboard `brcmfmac` WiFi
+enters power save by default and silently drops established TCP
+connections — the socket stays open, the read never returns, and any
+unbounded HTTP request parks its goroutine forever. The app now bounds
+every request (see `gtfs/httpclient.go`), so this can no longer wedge the
+board, but disabling power save avoids the failed polls entirely:
+
+```sh
+ssh <pi-host> "sudo iw dev wlan0 set power_save off"                 # now
+ssh <pi-host> "echo 'options brcmfmac roamoff=1 feature_disable=0x82000' | sudo tee /etc/modprobe.d/brcmfmac.conf"   # persist across reboots
+ssh <pi-host> "iw dev wlan0 get power_save"                          # verify: 'off'
+```
+
+**The Pi has no battery-backed clock.** With no RTC it restores the last
+known time at boot (`fake-hwclock`) and only becomes accurate once NTP
+syncs. Every arrival time on the board is derived from the system clock, so
+a wrong clock means wrong departures. `tfi-display.service` orders itself
+after `time-sync.target` for this reason. Check sync with:
+
+```sh
+ssh <pi-host> "timedatectl"     # want: 'System clock synchronized: yes'
+```
+
+If the header shows `! STALE` next to the timestamp, the board has stopped
+receiving live data and every listed arrival is a scheduled time, not a
+realtime one. Check `journalctl -u tfi-display -n 50` — and note the
+watchdog (`feed_watchdog_seconds`, 30 minutes by default) will restart the
+service on its own if the feed never comes back.
+
 ## Making changes later
 
 After editing `config.yaml` or the code, just re-run `make deploy` — it rebuilds and restarts the service. To restart without redeploying:

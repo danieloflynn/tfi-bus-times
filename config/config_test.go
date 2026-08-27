@@ -189,3 +189,40 @@ func TestLoadWithSecrets_MalformedSecretsFile(t *testing.T) {
 		t.Fatal("expected error for malformed secrets file")
 	}
 }
+
+// --- feed_watchdog_seconds ---
+
+func TestLoad_FeedWatchdogDefault(t *testing.T) {
+	p := writeTemp(t, "config.yaml", `api_key: "k"`+validStops)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FeedWatchdogSec != 1800 {
+		t.Errorf("default FeedWatchdogSec = %d, want 1800", cfg.FeedWatchdogSec)
+	}
+}
+
+func TestLoad_FeedWatchdogExplicit(t *testing.T) {
+	p := writeTemp(t, "config.yaml", "api_key: \"k\"\nfeed_watchdog_seconds: 600\n"+validStops)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FeedWatchdogSec != 600 {
+		t.Errorf("FeedWatchdogSec = %d, want 600", cfg.FeedWatchdogSec)
+	}
+}
+
+// A negative value is the documented opt-out and must survive default-filling,
+// since main.go treats <= 0 as "watchdog disabled".
+func TestLoad_FeedWatchdogDisabled(t *testing.T) {
+	p := writeTemp(t, "config.yaml", "api_key: \"k\"\nfeed_watchdog_seconds: -1\n"+validStops)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FeedWatchdogSec != -1 {
+		t.Errorf("FeedWatchdogSec = %d, want -1 preserved", cfg.FeedWatchdogSec)
+	}
+}
