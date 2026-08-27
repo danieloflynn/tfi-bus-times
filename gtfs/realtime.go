@@ -225,6 +225,12 @@ type Poller struct {
 	watched    map[string]bool
 	watchedFor *StaticDB
 
+	// client performs the feed fetch. It defaults to the package's bounded
+	// rtClient (see httpclient.go — an unbounded client is what wedged the
+	// board); it is a field only so tests can substitute a short-timeout client
+	// and exercise the hang path in milliseconds.
+	client *http.Client
+
 	// remote optionally mirrors poll outcomes to the update server. Left nil
 	// unless SetRemoteLogger is called (nil is safe — remotelog.Client's
 	// methods no-op on a nil receiver), so existing callers/tests are
@@ -240,7 +246,19 @@ func NewPoller(url, apiKey string, db *DB) *Poller {
 		apiKey: apiKey,
 		db:     db,
 		store:  NewLiveStore(),
+		client: rtClient,
 	}
+}
+
+// httpClient returns the client used for feed fetches, defaulting to the
+// package's bounded rtClient. The nil fallback means a hand-built Poller
+// literal gets a bounded client rather than a nil-pointer panic — the same
+// zero-value safety remotelog.Client provides.
+func (p *Poller) httpClient() *http.Client {
+	if p.client == nil {
+		return rtClient
+	}
+	return p.client
 }
 
 // SetRemoteLogger wires a remotelog.Client so poll successes/slow
@@ -292,7 +310,10 @@ func (p *Poller) fetch() ([]byte, error) {
 	req.Header.Set("x-api-key", p.apiKey)
 	req.Header.Set("Cache-Control", "no-cache")
 
-	resp, err := http.DefaultClient.Do(req)
+	// Always a bounded client, never http.DefaultClient: DefaultClient has no
+	// timeout, and a poll that never returns freezes the board's clock and its
+	// live data indefinitely (see httpclient.go).
+	resp, err := p.httpClient().Do(req)
 	if err != nil {
 		slog.Error("realtime fetch", "err", err)
 		p.remote.Error("realtime fetch: " + err.Error())

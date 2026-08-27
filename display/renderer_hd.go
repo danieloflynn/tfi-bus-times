@@ -71,6 +71,11 @@ func renderHD(img *image.Gray, sections []StopSection, now, feedTime time.Time, 
 		hdDrawText(img, Version, 4, headerBaseline, white, fonts.HeaderFace)
 	}
 	updated := "Updated: " + feedTime.Format("15:04:05")
+	// Only in the (rare) stale case does this concatenate a second time; the
+	// healthy path keeps the single allocation the Format above already makes.
+	if isStale(now, feedTime) {
+		updated += staleMarker
+	}
 	hdDrawTextRight(img, updated, width-4, headerBaseline, white, fonts.HeaderFace)
 
 	if len(sections) == 0 {

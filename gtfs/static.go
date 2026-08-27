@@ -137,7 +137,10 @@ func MaybeRebuild(staticURL, dataDir string, filterStops []string, currentTimest
 
 // isNewerZIPAvailable does a HEAD request and compares Last-Modified.
 func isNewerZIPAvailable(url string, cached time.Time) bool {
-	resp, err := http.Head(url)
+	// Bounded client, not http.Head: an unbounded HEAD that hangs would wedge
+	// the background refresher goroutine for the life of the process, and the
+	// static dataset would silently go stale (see httpclient.go).
+	resp, err := staticHeadClient.Head(url)
 	if err != nil {
 		slog.Warn("HEAD request failed", "err", err)
 		return false
@@ -157,7 +160,7 @@ func isNewerZIPAvailable(url string, cached time.Time) bool {
 // buildFromURL downloads the GTFS ZIP and parses it.
 func buildFromURL(url string, filterStops []string) (*StaticDB, error) {
 	slog.Info("downloading GTFS static data", "url", url)
-	resp, err := http.Get(url)
+	resp, err := staticDownloadClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("downloading GTFS: %w", err)
 	}
